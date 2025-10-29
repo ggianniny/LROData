@@ -132,8 +132,83 @@ q.cor
 ggsave("Discharge_Comb.jpg", q.cor, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
 ```
 
+### B. Water Temperature
+
+First, filter out stream sites: 
+
+```{r}
+streamData <- noNeg%>%
+  filter(!str_detect(siteName, "Climate")) #drop all sites that have "Climate" in the name
+
+unique(streamData$siteName) #check if successful
+unique(streamData$parameter) #check available parameters
+```
 
 
+Plotting:
 
+```{r}
+#Initial plot:
+stream.temp <- ggplot(
+  filter(streamData,
+         parameter == "Temperature"), 
+  aes(x = dateTime, y = parameterValue, color = siteName)
+)+
+  geom_line()+
+  theme_classic()+
+  labs(x = "Date", y = "Stream Temperature, deg. C", color = "Station Name")+
+  scale_color_manual(values = discharge.pal)+
+  theme(legend.position = "bottom", 
+        axis.title = element_text(size = 10, face = "bold"), 
+        legend.title = element_text(size = 10, face = "bold"))
 
+stream.temp
+```
+
+Pretty major issues - checking some basic stats: 
+
+```{r}
+summary(
+  filter(streamData, parameter == "Temperature")$parameterValue 
+)
+```
+
+Most obs are between 3-9 deg C, but some weird high and low outliers. Try filtering everything <-20 or greater than 50C: 
+
+```{r}
+streamCor <- streamData%>%
+  mutate(
+    parameterValue = case_when(parameter=="Temperature"&parameterValue<(0-20)~NA, #replace all stream temps < -20 with NA
+                               parameter=="Temperature"&parameterValue>50~NA, #replace all stream temps > 25 with NA
+                               .default = parameterValue)
+  )
+
+summary(
+  filter(streamCor, parameter == "Temperature")$parameterValue #check results
+)
+```
+
+Seems to work for low outliers, possibly some exposures on the high end (82 deg F for a water temp seems unlikely).
+
+Checking results with a plot: 
+
+```{r}
+#Corrected plot:
+stream.cor <- ggplot(
+  filter(streamCor,
+         parameter == "Temperature"), 
+  aes(x = dateTime, y = parameterValue, color = siteName)
+)+
+  geom_line()+
+  theme_classic()+
+  labs(x = "Date", y = "Stream Temperature, deg. C", color = "Station Name")+
+  scale_color_manual(values = discharge.pal)+
+  theme(legend.position = "bottom", 
+        axis.title = element_text(size = 10, face = "bold"), 
+        legend.title = element_text(size = 10, face = "bold"))
+
+stream.cor
+```
+
+Looks much better - Still likely some outliers or logger exposures on the upper end, but at least a coherent plot. 
 
