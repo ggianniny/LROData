@@ -1,0 +1,139 @@
+```{r, include=F, eco = F}
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(RColorBrewer)
+library(here)
+```
+
+## I. Overview
+
+This script performs initial data cleanining, visualization, and basic analysis for five test sites in the Logan River Observatory network. These sites include: 
+
+- Logan River at Franklin Basin (discharge, water temp)
+- Logan River at Main Street (discharge, water temp)
+- Logan River at Mendon (discharge, water temp)
+- Franklin Basin Climate Station (Precipitation, Air temp)
+- Logan River Golf Course Climate Station (Precipitation, Air temp)
+
+Data for all five sites were downloaded on 10/26/2025 at 3:30 MST as individual .csv files from the LRO Hydroserver page (https://lro.hydroserver.org/browse)
+
+This script performs the following actions: 
+
+A. Read in and clean data files
+B. Combine data files for easier plotting
+C. Plotting and basic analysis
+
+
+## II. Read in and clean data files
+
+Make list of all data files in data folder (includes all sites + parameters listed above):
+
+```{r}
+fileNames <- list.files(here("data"), full.names = T)
+```
+
+Read in data and store in a list: 
+
+```{r}
+dataList <- list() #empty list to receive data
+mdList <- list() #empty list to receive metadata
+
+
+for(i in 1:length(fileNames)){ #loop over fileNames vector
+  mdTemp<-read.csv(fileNames[i], col.names = c("C1")) #read in "ith" file
+  
+  mdTemp1<-mdTemp%>% 
+    mutate(rownum = c(1:nrow(mdTemp)))%>% #add rownum column
+    filter(rownum == 11 | rownum == 57 |rownum == 65)%>% #extract desired metadata rows (station name, parameter name)
+    mutate(metadata = substr(C1, 9, nchar(C1)))%>% #remove "# Name:" from beginning of metadata entries
+    select(metadata, rownum)%>% #drop extra cols
+    pivot_wider(names_from = rownum, values_from = metadata)%>% #pivot wider to get columns for site name and parameter 
+    rename(siteName = 1, parameter = 2, units =3)%>% #add column names
+    mutate(dataRef = i) #add reference column for later merge
+  
+  mdList[[i]] <- mdTemp1 #store as "ith" item in metadata list
+  
+  dataList[[i]]<-read.csv(fileNames[i], skip = 81)%>% #read in "ith" file, skipping 81 lines of metadata
+    mutate(dataRef = i)%>% #add reference column for merge with metadata
+    mutate(date = substr(ResultTime, 1, 10), #extract date from ResultTime column
+           time = substr(ResultTime, 12, 19), #extract time from ResultTime column
+           dateTime = ymd_hms(paste(date, time, sep = " ")))%>% #create new dateTime column in POSIXct format
+    rename(parameterValue = Result)%>% #rename result column
+    select(parameterValue, ResultQualifiers, dateTime, dataRef) #drop extra cols
+}
+
+
+head(dataList[[10]]) #check outputs
+head(mdList[[10]])
+
+```
+
+## II. Combine data files for easier plotting
+
+```{r}
+mdAll <-mdList%>%
+  bind_rows()#rbind all metadata files into 1 DF
+dataAll <-dataList%>%
+  bind_rows()#rbind all data files into 1 DF
+
+fullData <- merge(mdAll, dataAll) #merge metadata and data by dataRef column 
+
+head(fullData)
+tail(fullData)
+```
+
+## III. Basic plotting & analysis
+
+### A. Discharge
+
+Starting with a basic time series, y = discharge CFS, x = date Time, color = site. 
+
+```{r}
+q.comb <- ggplot(
+  filter(fullData, parameter == "Discharge"), 
+  aes(x = dateTime, y = parameterValue, color = siteName)
+)+
+  geom_line()+
+  theme_classic()+
+  labs(x = "Date", y = "Discharge, CFS", color = "Station Name")
+q.comb
+```
+
+Appear to be some major data issues - significant negative readings, especially at FB and Main St sites. Try removing all negative values: 
+
+```{r}
+noNeg <- fullData%>%
+  filter(!(parameter=="Discharge"&parameterValue<0)) #drop discharge values <0
+```
+
+```{r}
+#color palate: 
+
+discharge.pal <- c("#2171B5", "#08306B",  "#9ECAE1")
+
+#Check with updated plot: 
+q.cor <- ggplot(
+  filter(noNeg, parameter == "Discharge"), 
+  aes(x = dateTime, y = parameterValue, color = siteName)
+)+
+  geom_line()+
+  theme_classic()+
+  labs(x = "Date", y = "Discharge, CFS", color = "Station Name")+
+  scale_color_manual(values = discharge.pal)+
+  theme(legend.position = "bottom", 
+        axis.title = element_text(size = 10, face = "bold"), 
+        legend.title = element_text(size = 10, face = "bold"))
+
+q.cor
+
+#Save: 
+
+ggsave("Discharge_Comb.jpg", q.cor, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
+```
+
+
+
+
+
+
