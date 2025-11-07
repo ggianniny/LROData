@@ -1,12 +1,20 @@
-```{r, include=F, eco = F}
+```{r setup, include=F, echo = F}
 library(tidyverse)
 library(ggplot2)
 library(lubridate)
 library(RColorBrewer)
 library(here)
+library(reticulate)
+
+py_require("pip")
+py_require("hydroserverpy")
+py_require("datetime")
+
+
+knitr::opts_knit$set(root.dir = here("outputs", "htmls"))
 ```
 
-## I. Overview
+## Overview
 
 This script performs initial data cleanining, visualization, and basic analysis for five test sites in the Logan River Observatory network. These sites include: 
 
@@ -16,72 +24,170 @@ This script performs initial data cleanining, visualization, and basic analysis 
 - Franklin Basin Climate Station (Precipitation, Air temp)
 - Logan River Golf Course Climate Station (Precipitation, Air temp)
 
-Data for all five sites were downloaded on 10/26/2025 at 3:30 MST as individual .csv files from the LRO Hydroserver page (https://lro.hydroserver.org/browse)
+Data is called directly from the LRO Hydroserver API (https://lro.hydroserver.org/browse)
 
 This script performs the following actions: 
 
-A. Read in and clean data files
-B. Combine data files for easier plotting
-C. Plotting and basic analysis
+1. Read in and clean data files
+  + Call Metadata for all sites in the LRO network
+  + Filter out desired sites
+  + Import data using a for loop
+2. Plotting and basic analysis
+  + Discharge
+  + Stream Temperature
 
+## I. Connect to Hydroserver and import data
 
-## II. Read in and clean data files
+First, Import necessary packages; establish connection to Hydroserver
 
-Make list of all data files in data folder (includes all sites + parameters listed above):
+```{python}
+import hydroserverpy
+import datetime
+import pandas as pd
 
-```{r}
-fileNames <- list.files(here("data"), full.names = T)
-```
+from datetime import datetime
 
-Read in data and store in a list: 
+from hydroserverpy import HydroServer
 
-```{r}
-dataList <- list() #empty list to receive data
-mdList <- list() #empty list to receive metadata
+#initialize Hydroserver Connection with login Credentials **NOTE** you may need to update these to your Hydroserver login info
 
+hs_api = HydroServer(host = 'https://lro.hydroserver.org', email = 'ggianniny@gmail.com',password='syxqyz-Zeqpor-7naxki')
 
-for(i in 1:length(fileNames)){ #loop over fileNames vector
-  mdTemp<-read.csv(fileNames[i], col.names = c("C1")) #read in "ith" file
-  
-  mdTemp1<-mdTemp%>% 
-    mutate(rownum = c(1:nrow(mdTemp)))%>% #add rownum column
-    filter(rownum == 11 | rownum == 57 |rownum == 65)%>% #extract desired metadata rows (station name, parameter name)
-    mutate(metadata = substr(C1, 9, nchar(C1)))%>% #remove "# Name:" from beginning of metadata entries
-    select(metadata, rownum)%>% #drop extra cols
-    pivot_wider(names_from = rownum, values_from = metadata)%>% #pivot wider to get columns for site name and parameter 
-    rename(siteName = 1, parameter = 2, units =3)%>% #add column names
-    mutate(dataRef = i) #add reference column for later merge
-  
-  mdList[[i]] <- mdTemp1 #store as "ith" item in metadata list
-  
-  dataList[[i]]<-read.csv(fileNames[i], skip = 81)%>% #read in "ith" file, skipping 81 lines of metadata
-    mutate(dataRef = i)%>% #add reference column for merge with metadata
-    mutate(date = substr(ResultTime, 1, 10), #extract date from ResultTime column
-           time = substr(ResultTime, 12, 19), #extract time from ResultTime column
-           dateTime = ymd_hms(paste(date, time, sep = " ")))%>% #create new dateTime column in POSIXct format
-    rename(parameterValue = Result)%>% #rename result column
-    select(parameterValue, ResultQualifiers, dateTime, dataRef) #drop extra cols
-}
+#Load info for all datastreams:
 
-
-head(dataList[[10]]) #check outputs
-head(mdList[[10]])
+datastreams = hs_api.datastreams.list(fetch_all = True)
 
 ```
 
-## II. Combine data files for easier plotting
+### A. Call metadata for all "datastreams" (i.e. all parameters at all sites) in the LRO network
+
+Setup empty data frame to recieve data:
+
+```{python}
+df = pd.DataFrame(data = None, index = None, columns = ['uid', 'name', 'property','propCode','unit', 'medium', 'procLevel']) #initialize empty dataframe (outside loop)
+```
+
+Read in data with a for-loop (NOTE - this will take a few minutes to run)
+
+```{python}
+for i in range(0, len(datastreams.items)):
+        uid = str(datastreams.items[i].uid) #extract UID
+        name = str(datastreams.items[i].thing.name) #extract site name
+        prop = str(datastreams.items[i].observed_property.name) #extract measured property
+        propCode = str(datastreams.items[i].observed_property.code) #extract measured property code
+        unit = str(datastreams.items[i].unit.name) #extract unit
+        medium = str(datastreams.items[i].sampled_medium) #extract sampled medium
+        procLevel = str(datastreams.items[i].processing_level.definition) #extract processing level
+        siteInfo = pd.DataFrame(data = {'uid':[uid], 'name':[name], 'property':[prop], 'propCode':[propCode], 'unit':[unit],'medium':[medium], 'procLevel':[procLevel]}) #convert uid, name, and unit into dataframe 
+        df = pd.concat([df, siteInfo]) #add siteInfo to df
+        print("working on"+" "+str(i)) #print current site for progress tracking
+```
+
+### B. Filter out desired sites/parameters
+
+First - convert to python, filter out quality controlled data, create reference DF's
 
 ```{r}
-mdAll <-mdList%>%
-  bind_rows()#rbind all metadata files into 1 DF
-dataAll <-dataList%>%
-  bind_rows()#rbind all data files into 1 DF
+r_df <- py_to_r(py$df)%>% #converting to R for easier wrangling
+  filter(procLevel == "Quality controlled data"|procLevel == "Derived products")%>% #extract quality controlled and derived product data only
+  arrange(name, property)%>% #sort by name and unit for easier viewing
+  mutate(name = as.factor(name), 
+         property = if_else(property == "Temperature", paste(medium, property, sep = " "), property), 
+         property = if_else(str_detect(propCode, "WaterYr"), paste(property, "WaterYr", sep = " "), property),
+         property = if_else(str_detect(propCode, "Discharge"), propCode, property),
+         property = as.factor(property))%>%
+  mutate(siteNum = as.numeric(name), 
+         propNum = as.numeric(property))
 
-fullData <- merge(mdAll, dataAll) #merge metadata and data by dataRef column 
+nameRef <- r_df%>%
+  select(name, siteNum)%>%
+  distinct()%>% #Create dataframe with name references
+  arrange(name)
 
-head(fullData)
-tail(fullData)
+propRef <- r_df%>%
+  select(property, propNum)%>%
+  distinct()%>%
+  arrange(property)#Creste dataframe with property references
 ```
+
+Next: view reference dataframes, write down site numbers and property numbers for export 
+
+View name references:
+
+```{r}
+View(nameRef)
+```
+
+Enter desired site numbers below: 
+
+```{r}
+soi <- c(5,6,15,16,19) #ENTER DESIRED SITE NUMBERS HERE inside the parentheses. e.g. if you want sites 1, 3, and 19, the code should read "soi <- c(1, 3, 19)"
+```
+
+View property references:
+
+```{r}
+View(propRef)
+```
+
+Enter desired property numbers below:
+
+```{r}
+poi <- c(1,3,11,23) #ENTER DESIRED PROPERTY NUMBERS HERE inside the parentheses. e.g. if you want properties 8, 17, and 21, the code should read "soi <- c(8, 17, 21)"
+```
+
+Extract desired metadata:
+
+```{r}
+#extract desired datastreams:
+toDownload <- r_df %>%
+  filter(
+    siteNum %in% soi&propNum %in% poi
+  )
+
+#Check to ensure all sites/data are present: 
+View(toDownload)
+
+#convert back to Python for download: 
+
+pyDownload <- r_to_py(toDownload)
+```
+
+
+### C. Import data using a for loop
+
+Setup:
+
+```{python}
+#Read "to download" dataframe into Python environment
+pyDownload = pd.DatFrame(r.pyDownload)
+
+#initialize empty dataframe to receive data: 
+
+fullData = pd.DataFrame(data = None, index = None, columns = ['phenomenon_time', 'result', 'site','param', 'unit']) #initialize empty dataframe (outside loop)
+```
+
+Read in all data using a For loop - NOTE, this will take a while to run (~2-4 min per site)
+
+```{python}
+for var in range(0, len(pyDownload["uid"])): #iterate on "i" over # rows in the pyDownload DF
+  print("started"+" "+pyDownload.iloc[var,1]) #print current site name for progress tracking
+  data = hs_api.datastreams.get_observations(fetch_all = True, uid = pyDownload.iloc[var,0]).dataframe #read in data to temporary df
+  data['site'] = pyDownload.iloc[var,1] #add site name
+  data['param'] = pyDownload.iloc[var,2] #add parameter name
+  data['unit'] = pyDownload.iloc[var,4] #add unit 
+  fullData = pd.concat([fullData, data]) #add data to fullData df created in block above. 
+  print("finished"+" "+pyDownload.iloc[var,1]) #print current site name for progress tracking
+```
+
+Convert full data file back to R for additional wrangling and analysis: 
+
+```{r}
+fullData <- py_to_r(py$fullData)%>%
+  rename(parameterValue = result, dateTime = phenomenon_time, parameter = param)%>%
+  mutate(dateTime = ymd_hms(dateTime))
+```
+
 
 ## III. Basic plotting & analysis
 
@@ -91,8 +197,8 @@ Starting with a basic time series, y = discharge CFS, x = date Time, color = sit
 
 ```{r}
 q.comb <- ggplot(
-  filter(fullData, parameter == "Discharge"), 
-  aes(x = dateTime, y = parameterValue, color = siteName)
+  filter(fullData, parameter == "Discharge_cfs"), 
+  aes(x = dateTime, y = parameterValue, color = site)
 )+
   geom_line()+
   theme_classic()+
@@ -100,11 +206,11 @@ q.comb <- ggplot(
 q.comb
 ```
 
-Appear to be some major data issues - significant negative readings, especially at FB and Main St sites. Try removing all negative values: 
+Appear to be some major data issues - significant negative readings, especially at FB and Main St sites. Try replacing negatives with NA: 
 
 ```{r}
 noNeg <- fullData%>%
-  filter(!(parameter=="Discharge"&parameterValue<0)) #drop discharge values <0
+  mutate(parameterValue = ifelse(parameter =="Discharge_cfs"&parameterValue<0, NA, parameterValue)) #set discharge values <0 = NA
 ```
 
 ```{r}
@@ -114,8 +220,8 @@ discharge.pal <- c("#2171B5", "#08306B",  "#9ECAE1")
 
 #Check with updated plot: 
 q.cor <- ggplot(
-  filter(noNeg, parameter == "Discharge"), 
-  aes(x = dateTime, y = parameterValue, color = siteName)
+  filter(noNeg, parameter == "Discharge_cfs"), 
+  aes(x = dateTime, y = parameterValue, color = site)
 )+
   geom_line()+
   theme_classic()+
@@ -134,15 +240,6 @@ ggsave("Discharge_Comb.jpg", q.cor, device = "jpeg", path = here("outputs", "plo
 
 ### B. Water Temperature
 
-First, filter out stream sites: 
-
-```{r}
-streamData <- noNeg%>%
-  filter(!str_detect(siteName, "Climate")) #drop all sites that have "Climate" in the name
-
-unique(streamData$siteName) #check if successful
-unique(streamData$parameter) #check available parameters
-```
 
 
 Plotting:
@@ -150,9 +247,9 @@ Plotting:
 ```{r}
 #Initial plot:
 stream.temp <- ggplot(
-  filter(streamData,
-         parameter == "Temperature"), 
-  aes(x = dateTime, y = parameterValue, color = siteName)
+  filter(noNeg,
+         parameter == "Surface Water Temperature"), 
+  aes(x = dateTime, y = parameterValue, color = site)
 )+
   geom_line()+
   theme_classic()+
@@ -169,22 +266,22 @@ Pretty major issues - checking some basic stats:
 
 ```{r}
 summary(
-  filter(streamData, parameter == "Temperature")$parameterValue 
+  filter(noNeg, parameter == "Surface Water Temperature")$parameterValue 
 )
 ```
 
 Most obs are between 3-9 deg C, but some weird high and low outliers. Try filtering everything <-20 or greater than 50C: 
 
 ```{r}
-streamCor <- streamData%>%
+noNeg_cor <- noNeg%>%
   mutate(
-    parameterValue = case_when(parameter=="Temperature"&parameterValue<(0-20)~NA, #replace all stream temps < -20 with NA
-                               parameter=="Temperature"&parameterValue>50~NA, #replace all stream temps > 25 with NA
+    parameterValue = case_when(parameter=="Surface Water Temperature"&parameterValue<(0-20)~NA, #replace all stream temps < -20 with NA
+                               parameter=="Surface Water Temperature"&parameterValue>50~NA, #replace all stream temps > 25 with NA
                                .default = parameterValue)
   )
 
 summary(
-  filter(streamCor, parameter == "Temperature")$parameterValue #check results
+  filter(noNeg_cor, parameter == "Surface Water Temperature")$parameterValue #check results
 )
 ```
 
@@ -195,9 +292,9 @@ Checking results with a plot:
 ```{r}
 #Corrected plot:
 stream.cor <- ggplot(
-  filter(streamCor,
-         parameter == "Temperature"), 
-  aes(x = dateTime, y = parameterValue, color = siteName)
+  filter(noNeg_cor,
+         parameter == "Surface Water Temperature"), 
+  aes(x = dateTime, y = parameterValue, color = site)
 )+
   geom_line()+
   theme_classic()+
@@ -208,7 +305,80 @@ stream.cor <- ggplot(
         legend.title = element_text(size = 10, face = "bold"))
 
 stream.cor
+
+#Save: 
+
+ggsave("StreamTemp_Comb.jpg", stream.cor, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
 ```
 
 Looks much better - Still likely some outliers or logger exposures on the upper end, but at least a coherent plot. 
+
+
+
+
+
+
+
+
+### NOT USED: Manually read in and clean data files with r
+
+Make list of all data files in data folder (includes all sites + parameters listed above):
+
+```{r}
+#fileNames <- list.files(here("data"), full.names = T)
+```
+
+Read in data and store in a list: 
+
+```{r}
+#dataList <- list() #empty list to receive data
+#mdList <- list() #empty list to receive metadata
+
+
+#for(i in 1:length(fileNames)){ #loop over fileNames vector
+#  mdTemp<-read.csv(fileNames[i], col.names = c("C1")) #read in "ith" file
+  
+#  mdTemp1<-mdTemp%>% 
+#    mutate(rownum = c(1:nrow(mdTemp)))%>% #add rownum column
+ #   filter(rownum == 11 | rownum == 57 |rownum == 65)%>% #extract desired metadata rows (station name, parameter name)
+  #  mutate(metadata = substr(C1, 9, nchar(C1)))%>% #remove "# Name:" from beginning of metadata entries
+   # select(metadata, rownum)%>% #drop extra cols
+   # pivot_wider(names_from = rownum, values_from = metadata)%>% #pivot wider to get columns for site name and parameter 
+   # rename(site = 1, parameter = 2, units =3)%>% #add column names
+   # mutate(dataRef = i) #add reference column for later merge
+  
+#  mdList[[i]] <- mdTemp1 #store as "ith" item in metadata list
+  
+ # dataList[[i]]<-read.csv(fileNames[i], skip = 81)%>% #read in "ith" file, skipping 81 lines of metadata
+  #  mutate(dataRef = i)%>% #add reference column for merge with metadata
+   # mutate(date = substr(ResultTime, 1, 10), #extract date from ResultTime column
+    #       time = substr(ResultTime, 12, 19), #extract time from ResultTime column
+     #      dateTime = ymd_hms(paste(date, time, sep = " ")))%>% #create new dateTime column in POSIXct format
+    #rename(parameterValue = Result)%>% #rename result column
+#    select(parameterValue, ResultQualifiers, dateTime, dataRef) #drop extra cols
+#}
+
+
+#head(dataList[[10]]) #check outputs
+#head(mdList[[10]])
+
+```
+
+## NOT USED Combine data files for easier plotting
+
+```{r}
+#mdAll <-mdList%>%
+ # bind_rows()#rbind all metadata files into 1 DF
+#dataAll <-dataList%>%
+#  bind_rows()#rbind all data files into 1 DF
+
+#fullData <- merge(mdAll, dataAll) #merge metadata and data by dataRef column 
+
+#head(fullData)
+#tail(fullData)
+```
+
+
+
+
 

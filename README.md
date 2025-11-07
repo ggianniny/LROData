@@ -1,6 +1,6 @@
 ## LROData
 
-Data cleaning, visualization, and basic analysis for Logan River Observatory Hydrologic and Climatological data. 
+Data cleaning, visualization, and basic analysis for Logan River Observatory Hydrologic and Climatological data. Major project operations are carried out in the **"LRO_Data.RMD"** script, which calls data from the LRO HydroServer API, makes some basic plots, and performs basic analysis.
 
 ### Project structure: 
 
