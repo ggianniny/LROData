@@ -180,38 +180,57 @@ for var in range(0, len(pyDownload["uid"])): #iterate on "i" over # rows in the 
   print("finished"+" "+pyDownload.iloc[var,1]) #print current site name for progress tracking
 ```
 
-Convert full data file back to R for additional wrangling and analysis: 
+Convert full data file back to R for additional wrangling and analysis; replace -9999 values with NA: 
 
 ```{r}
 fullData <- py_to_r(py$fullData)%>%
-  rename(parameterValue = result, dateTime = phenomenon_time, parameter = param)%>%
-  mutate(dateTime = ymd_hms(dateTime))
+  rename(parameterValue = result, dateTime = phenomenon_time, parameter = param)%>% #renaming columns
+  mutate(dateTime = ymd_hms(dateTime), #convert date time to POSIXct
+         parameterValue = ifelse(parameterValue == -9999, NA, parameterValue)) #replace "no data" value o f-9999 with NA
+```
+
+Check date ranges for each site: 
+
+```{r}
+dateRanges <- fullData%>%
+  group_by(site, parameter)%>%
+  summarise(start = min(dateTime), 
+            end = max(dateTime))
+dateRanges
+```
+
+### D. Alternative formatting for DOY plotting:
+
+Alternative data format for DOY plots: 
+
+```{r}
+dailyData <- fullData%>%
+  mutate(parameter = ifelse(parameter == "Discharge_cfs", "Discharge", parameter),
+    siteParam = paste(site, parameter, sep = " "))%>% #add new Site + parameter column for grouping
+  mutate(doy = yday(dateTime), #make new DOY column
+         date = ymd(substr(dateTime, 1,10)))%>% #make new column with just date
+  group_by(siteParam, date, unit, parameter, doy)%>%
+  summarise(paramDaily = mean(parameterValue, na.rm = TRUE))%>% #calculate daily average
+  group_by(siteParam, doy)%>% #group by day of year
+  mutate(paramMin = min(paramDaily, na.rm = T), 
+         paramMax = max(paramDaily, na.rm = T), 
+         paramMed = median(paramDaily, na.rm = T), 
+         paramMean = mean(paramDaily, na.rm = T), 
+         qt1 = quantile(paramDaily, probs = 0.2, na.rm = T)[[1]], 
+         qt2 = quantile(paramDaily, probs = 0.4, na.rm = T)[[1]], 
+         qt3 = quantile(paramDaily, probs = 0.6, na.rm = T)[[1]], 
+         qt4 = quantile(paramDaily, probs = 0.8, na.rm = T)[[1]], )%>% #calculate day of year minimum, maximum, median, and mean, plus quantiles for each doy
+  ungroup()%>% #ungroup
+  arrange(siteParam, date) #sort by site+parameter and date for easier checking
 ```
 
 
-## III. Basic plotting & analysis
+
+## II. Time Series Plots
 
 ### A. Discharge
 
 Starting with a basic time series, y = discharge CFS, x = date Time, color = site. 
-
-```{r}
-q.comb <- ggplot(
-  filter(fullData, parameter == "Discharge_cfs"), 
-  aes(x = dateTime, y = parameterValue, color = site)
-)+
-  geom_line()+
-  theme_classic()+
-  labs(x = "Date", y = "Discharge, CFS", color = "Station Name")
-q.comb
-```
-
-Appear to be some major data issues - significant negative readings, especially at FB and Main St sites. Try replacing negatives with NA: 
-
-```{r}
-noNeg <- fullData%>%
-  mutate(parameterValue = ifelse(parameter =="Discharge_cfs"&parameterValue<0, NA, parameterValue)) #set discharge values <0 = NA
-```
 
 ```{r}
 #color palate: 
@@ -219,35 +238,33 @@ noNeg <- fullData%>%
 discharge.pal <- c("#2171B5", "#08306B",  "#9ECAE1")
 
 #Check with updated plot: 
-q.cor <- ggplot(
-  filter(noNeg, parameter == "Discharge_cfs"), 
-  aes(x = dateTime, y = parameterValue, color = site)
+q.comb <- ggplot(
+  filter(fullData, parameter == "Discharge_cfs"), #extract discharge data
+  aes(x = dateTime, y = parameterValue, color = site) #setting mapping
 )+
   geom_line()+
   theme_classic()+
-  labs(x = "Date", y = "Discharge, CFS", color = "Station Name")+
-  scale_color_manual(values = discharge.pal)+
+  labs(x = "Date", y = "Discharge, CFS", color = "Station Name")+ #axis labels
+  scale_color_manual(values = discharge.pal)+ #Setting color palate
   theme(legend.position = "bottom", 
         axis.title = element_text(size = 10, face = "bold"), 
-        legend.title = element_text(size = 10, face = "bold"))
+        legend.title = element_text(size = 10, face = "bold")) #editing text appearance 
 
-q.cor
+q.comb
 
 #Save: 
 
-ggsave("Discharge_Comb.jpg", q.cor, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
+ggsave("Discharge_Comb.jpg", q.comb, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
 ```
 
 ### B. Water Temperature
 
-
-
-Plotting:
+Basic Time Series:
 
 ```{r}
 #Initial plot:
 stream.temp <- ggplot(
-  filter(noNeg,
+  filter(fullData,
          parameter == "Surface Water Temperature"), 
   aes(x = dateTime, y = parameterValue, color = site)
 )+
@@ -260,65 +277,178 @@ stream.temp <- ggplot(
         legend.title = element_text(size = 10, face = "bold"))
 
 stream.temp
+
+#Save: 
+
+ggsave("StreamTemp_Comb.jpg", stream.temp, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
 ```
 
-Pretty major issues - checking some basic stats: 
+
+
+### C. Air Temperature
+
+Basic time series:
 
 ```{r}
-summary(
-  filter(noNeg, parameter == "Surface Water Temperature")$parameterValue 
-)
-```
+climate.pal <- c("#C7E9C0","#238B45" )
 
-Most obs are between 3-9 deg C, but some weird high and low outliers. Try filtering everything <-20 or greater than 50C: 
-
-```{r}
-noNeg_cor <- noNeg%>%
-  mutate(
-    parameterValue = case_when(parameter=="Surface Water Temperature"&parameterValue<(0-20)~NA, #replace all stream temps < -20 with NA
-                               parameter=="Surface Water Temperature"&parameterValue>50~NA, #replace all stream temps > 25 with NA
-                               .default = parameterValue)
-  )
-
-summary(
-  filter(noNeg_cor, parameter == "Surface Water Temperature")$parameterValue #check results
-)
-```
-
-Seems to work for low outliers, possibly some exposures on the high end (82 deg F for a water temp seems unlikely).
-
-Checking results with a plot: 
-
-```{r}
-#Corrected plot:
-stream.cor <- ggplot(
-  filter(noNeg_cor,
-         parameter == "Surface Water Temperature"), 
+air.temp <- ggplot(
+  filter(fullData,
+         parameter == "Air Temperature"), 
   aes(x = dateTime, y = parameterValue, color = site)
 )+
   geom_line()+
   theme_classic()+
-  labs(x = "Date", y = "Stream Temperature, deg. C", color = "Station Name")+
-  scale_color_manual(values = discharge.pal)+
+  labs(x = "Date", y = "Air, deg. C", color = "Station Name")+
+  scale_color_manual(values = climate.pal)+
   theme(legend.position = "bottom", 
         axis.title = element_text(size = 10, face = "bold"), 
         legend.title = element_text(size = 10, face = "bold"))
 
-stream.cor
+air.temp
+
 
 #Save: 
 
-ggsave("StreamTemp_Comb.jpg", stream.cor, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
+ggsave("AirTemp_Comb.jpg", air.temp, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
 ```
 
-Looks much better - Still likely some outliers or logger exposures on the upper end, but at least a coherent plot. 
+### D. Precipitation
+
+Basic time series:
+
+```{r}
+precip <- ggplot(
+  filter(fullData,
+         parameter == "Precipitation"), 
+  aes(x = dateTime, y = parameterValue, color = site)
+)+
+  geom_line()+
+  theme_classic()+
+  labs(x = "Date", y = "Cumulative Annual Precipitation, cm", color = "Station Name")+
+  scale_color_manual(values = climate.pal)+
+  theme(legend.position = "bottom", 
+        axis.title = element_text(size = 10, face = "bold"), 
+        legend.title = element_text(size = 10, face = "bold"))
+
+precip
 
 
+#Save: 
+
+ggsave("Precip_Comb.jpg", precip, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
+```
 
 
+## III. Day of year plotting
 
+Using "dailyData" dataframe created in step I. 
 
+First, Test plotting day of year plot with one site - data prep: 
 
+```{r}
+thisyear <- format(Sys.Date(), "%Y") #Create object with this year for later filtering
+test <- filter(dailyData, siteParam == "Climate Station at Franklin Basin Air Temperature") #make test dataset with one site/parameter
+
+datemin <- year(min(test$date))
+datemax <- year(max(test$date)) #Make date range object for labeling
+                   
+```
+
+Plotting:
+
+```{r}
+testplot <- ggplot()+ 
+  geom_line(data = test, aes(x = doy, y = paramMin, color = "Minimum"))+ #draw minimum line 
+  geom_line(data = test, aes(x = doy, y = paramMed, color = paste("Median ", "(", datemin, "-", datemax, ")", sep = "")))+ #draw median line, add daterange object for label
+  geom_line(data = test, aes(x = doy, y = paramMax, color = "Maximum"))+ #add maximum line
+  geom_line(data = filter(test, year(date) == datemax), aes(x = doy, y = paramDaily, color = paste(datemax)))+ #filter out this year's data and add to plot
+  scale_color_manual(values = c("black", "blue", "green", "red"))+ #Setting line color scale
+  labs(x = "Day of Year", y = "Discharge, CFS", color = "Legend", title = unique(test$siteParam))+ #axis and legend lables
+  geom_ribbon(data = test, aes(x = doy, ymax = paramMax, ymin = qt4), fill = "blue", alpha = 0.25)+
+  geom_ribbon(data = test, aes(x = doy, ymax = qt4, ymin = qt3), fill = "lightblue", alpha = 0.25)+
+  geom_ribbon(data = test, aes(x = doy, ymax = qt3, ymin = qt2), fill = "green", alpha = 0.25)+
+  geom_ribbon(data = test, aes(x = doy, ymax = qt2, ymin = qt1), fill = "yellow", alpha = 0.25)+
+  geom_ribbon(data = test, aes(x = doy, ymax = qt1, ymin = paramMin), fill = "red", alpha = 0.25)+ #adding shaded ribbons for quantiles
+  theme_classic()+ #removing background formatting
+  theme(legend.position = c(0.8, 0.75), #repositioning legend within plot area
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 10, face = "bold"), 
+        legend.text = element_text(size = 9), 
+        legend.title = element_text(size = 9, face = "bold"), 
+        plot.title = element_text(size = 11, face = "bold")) #axis and legend text formatting
+testplot
+```
+
+Success! Next, iterate over each site/parameter to make all plots: 
+
+Setup: 
+
+```{r}
+allSiteParams <- unique(dailyData$siteParam) #make vector of all site/parameter combos
+plot.list <- list() #empty list to recieve plots
+thisyear <- format(Sys.Date(), "%Y") #Create object with this year for later filtering
+q.pal <- c("blue", "lightblue", "green", "yellow", "red")
+t.pal <- c("red", "yellow", "green", "lightblue", "blue")
+q.line <- c("black", "blue", "green", "red")
+t.line <- c("black", "red", "green", "blue") #set up color palate options
+dateMins <- year(dateRanges$start)
+dateMaxes <- year(dateRanges$end)
+```
+
+Make plots with a for-loop:
+
+```{r}
+for(i in 1:length(allSiteParams)){
+  d <- filter(dailyData, siteParam == allSiteParams[i]) #Filter data to "ith" site/parameter
+
+  fill.pal <- if (str_detect(allSiteParams[[i]], "Temperature")) t.pal else q.pal
+  line.pal <- if (str_detect(allSiteParams[[i]], "Temperature")) t.line else q.line
+  
+  yLab <- paste(
+    unique(d$parameter), 
+    unique(d$unit), 
+    sep = ", "
+  )
+  
+  #Plotting:
+  
+  p <- ggplot()+ 
+  geom_line(data = d, aes(x = doy, y = paramMin, color = "Minimum"))+ #draw minimum line 
+  geom_line(data = d, aes(x = doy, y = paramMed, color = paste("Median ", "(", dateMins[[i]], "-", dateMaxes[[i]], ")", sep = "")))+ #draw median line, add daterange object for label
+  geom_line(data = d, aes(x = doy, y = paramMax, color = "Maximum"))+ #add maximum line
+  geom_line(data = filter(d, year(date) == dateMaxes[[i]]), aes(x = doy, y = paramDaily, color = as.character(dateMaxes[[i]])))+ #filter out this year's data and add to plot
+  scale_color_manual(values = line.pal)+ #Setting line color scale
+  labs(x = "Day of Year", y = yLab, color = "Legend", title = unique(d$siteParam))+ #axis and legend lables
+  geom_ribbon(data = d, aes(x = doy, ymax = paramMax, ymin = qt4, fill = "q1"), alpha = 0.25)+
+  geom_ribbon(data = d, aes(x = doy, ymax = qt4, ymin = qt3, fill = "q2"), alpha = 0.25)+
+  geom_ribbon(data = d, aes(x = doy, ymax = qt3, ymin = qt2, fill = "q3"), alpha = 0.25)+
+  geom_ribbon(data = d, aes(x = doy, ymax = qt2, ymin = qt1, fill = "q4"), alpha = 0.25)+
+  geom_ribbon(data = d, aes(x = doy, ymax = qt1, ymin = paramMin, fill = "q5"), alpha = 0.25)+ #adding shaded ribbons for quantiles
+    scale_fill_manual(values = fill.pal)+
+    guides(fill = "none")+
+  theme_classic()+ #removing background formatting
+  theme(legend.position = "bottom", #re positioning legend along bottom
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 10, face = "bold"), 
+        legend.text = element_text(size = 9), 
+        legend.title = element_text(size = 9, face = "bold"), 
+        plot.title = element_text(size = 11, face = "bold")) #axis and legend text formatting
+  
+  plot.list[[i]]<-p #Save plot as "ith" plot in plot list
+  
+  fn <- paste(allSiteParams[[i]], ".jpg", sep = "")
+  
+  ggsave(fn, p, device = "jpeg", path = here("outputs", "plots", "doy_plots"), units = "in", dpi = "retina", height = 6, width = 11)
+  
+  print(paste("Finished", allSiteParams[[i]], sep = " ")) #Print site name/parameter for tracking
+}
+```
+Check outputs: 
+
+```{r}
+plot.list[[1]]
+```
 
 ### NOT USED: Manually read in and clean data files with r
 
@@ -377,7 +507,6 @@ Read in data and store in a list:
 #head(fullData)
 #tail(fullData)
 ```
-
 
 
 
