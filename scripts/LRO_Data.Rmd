@@ -1,10 +1,13 @@
 ```{r setup, include=F, echo = F}
 library(tidyverse)
+library(broom)
 library(ggplot2)
 library(lubridate)
 library(RColorBrewer)
 library(here)
 library(reticulate)
+library(patchwork)
+library(snotelr)
 
 py_require("pip")
 py_require("hydroserverpy")
@@ -36,7 +39,9 @@ This script performs the following actions:
   + Discharge
   + Stream Temperature
 
-## I. Connect to Hydroserver and import data
+## I. Import Data
+
+### A. LRO Data
 
 First, Import necessary packages; establish connection to Hydroserver
 
@@ -59,7 +64,7 @@ datastreams = hs_api.datastreams.list(fetch_all = True)
 
 ```
 
-### A. Call metadata for all "datastreams" (i.e. all parameters at all sites) in the LRO network
+#### i. Call metadata for all "datastreams" (i.e. all parameters at all sites) in the LRO network
 
 Setup empty data frame to recieve data:
 
@@ -83,7 +88,7 @@ for i in range(0, len(datastreams.items)):
         print("working on"+" "+str(i)) #print current site for progress tracking
 ```
 
-### B. Filter out desired sites/parameters
+#### ii. Filter out desired sites/parameters
 
 First - convert to python, filter out quality controlled data, create reference DF's
 
@@ -154,7 +159,7 @@ pyDownload <- r_to_py(toDownload)
 ```
 
 
-### C. Import data using a for loop
+#### iii. Import data using a for loop
 
 Setup:
 
@@ -199,7 +204,7 @@ dateRanges <- fullData%>%
 dateRanges
 ```
 
-### D. Alternative formatting for DOY plotting:
+#### iv. Alternative formatting for DOY plotting:
 
 Alternative data format for DOY plots: 
 
@@ -216,14 +221,35 @@ dailyData <- fullData%>%
          paramMax = max(paramDaily, na.rm = T), 
          paramMed = median(paramDaily, na.rm = T), 
          paramMean = mean(paramDaily, na.rm = T), 
-         qt1 = quantile(paramDaily, probs = 0.2, na.rm = T)[[1]], 
-         qt2 = quantile(paramDaily, probs = 0.4, na.rm = T)[[1]], 
-         qt3 = quantile(paramDaily, probs = 0.6, na.rm = T)[[1]], 
-         qt4 = quantile(paramDaily, probs = 0.8, na.rm = T)[[1]], )%>% #calculate day of year minimum, maximum, median, and mean, plus quantiles for each doy
+         qt1 = quantile(paramDaily, probs = 0.1, na.rm = T)[[1]], 
+         qt2 = quantile(paramDaily, probs = 0.3, na.rm = T)[[1]], 
+         qt3 = quantile(paramDaily, probs = 0.7, na.rm = T)[[1]], 
+         qt4 = quantile(paramDaily, probs = 0.9, na.rm = T)[[1]], )%>% #calculate day of year minimum, maximum, median, and mean, plus quantiles for each doy
   ungroup()%>% #ungroup
   arrange(siteParam, date) #sort by site+parameter and date for easier checking
 ```
 
+### B. SNOTEL Data
+
+Import data from Snotel using the snotelr package:
+
+Get metadata for sites in the Logan River Watershed:
+
+```{r}
+snotelSites <- snotel_info(network="sntl")%>%
+  filter(str_detect(description, "Logan")|str_detect(description, "Temple"))
+
+lro_siteIds <- c(snotelSites$site_id)
+```
+
+NOTE - currently NOT including USU Doc Daniel (on drainage divide between Logan and Garden City sides) or Little Bear (S End of Cache Valley)
+
+Download data for all sites: 
+
+```{r}
+loganSnotel <- snotel_download(site_id = lro_siteIds, network = "sntl", internal = T)%>%
+  mutate(date = ymd(date), site_name= as.factor(site_name))
+```
 
 
 ## II. Time Series Plots
@@ -339,6 +365,22 @@ precip
 ggsave("Precip_Comb.jpg", precip, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
 ```
 
+### E. SWE
+
+```{r}
+swe <- ggplot(loganSnotel, aes(x = date, y = snow_water_equivalent, color = site_name))+
+  geom_line()+
+  theme_classic()+
+  labs(x = "Date", y = "Snow Water Equivalent, cm", color = "Site Name")+
+  scale_color_manual(values = c("darkblue", "blue", "lightblue", "cyan4"))+
+  facet_wrap(~site_name)+
+  theme(legend.position = "none", 
+        axis.title = element_text(size = 10, face = "bold"), 
+        legend.title = element_text(size = 10, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"))
+swe
+```
+
 
 ## III. Day of year plotting
 
@@ -388,8 +430,8 @@ Setup:
 allSiteParams <- unique(dailyData$siteParam) #make vector of all site/parameter combos
 plot.list <- list() #empty list to recieve plots
 thisyear <- format(Sys.Date(), "%Y") #Create object with this year for later filtering
-q.pal <- c("blue", "lightblue", "green", "yellow", "red")
-t.pal <- c("red", "yellow", "green", "lightblue", "blue")
+q.pal <- c("#0000FF35", "#ADD8E635", "#00FF0035", "#FFFF0035" ,"#FF000035")
+t.pal <- rev(q.pal)
 q.line <- c("black", "blue", "green", "red")
 t.line <- c("black", "red", "green", "blue") #set up color palate options
 dateMins <- year(dateRanges$start)
@@ -402,7 +444,7 @@ Make plots with a for-loop:
 for(i in 1:length(allSiteParams)){
   d <- filter(dailyData, siteParam == allSiteParams[i]) #Filter data to "ith" site/parameter
 
-  fill.pal <- if (str_detect(allSiteParams[[i]], "Temperature")) t.pal else q.pal
+  fill.pal <- if (str_detect(allSiteParams[[i]], "Temperature")) q.pal else t.pal
   line.pal <- if (str_detect(allSiteParams[[i]], "Temperature")) t.line else q.line
   
   yLab <- paste(
@@ -417,23 +459,27 @@ for(i in 1:length(allSiteParams)){
   geom_line(data = d, aes(x = doy, y = paramMin, color = "Minimum"))+ #draw minimum line 
   geom_line(data = d, aes(x = doy, y = paramMed, color = paste("Median ", "(", dateMins[[i]], "-", dateMaxes[[i]], ")", sep = "")))+ #draw median line, add daterange object for label
   geom_line(data = d, aes(x = doy, y = paramMax, color = "Maximum"))+ #add maximum line
-  geom_line(data = filter(d, year(date) == dateMaxes[[i]]), aes(x = doy, y = paramDaily, color = as.character(dateMaxes[[i]])))+ #filter out this year's data and add to plot
   scale_color_manual(values = line.pal)+ #Setting line color scale
-  labs(x = "Day of Year", y = yLab, color = "Legend", title = unique(d$siteParam))+ #axis and legend lables
-  geom_ribbon(data = d, aes(x = doy, ymax = paramMax, ymin = qt4, fill = "q1"), alpha = 0.25)+
-  geom_ribbon(data = d, aes(x = doy, ymax = qt4, ymin = qt3, fill = "q2"), alpha = 0.25)+
-  geom_ribbon(data = d, aes(x = doy, ymax = qt3, ymin = qt2, fill = "q3"), alpha = 0.25)+
-  geom_ribbon(data = d, aes(x = doy, ymax = qt2, ymin = qt1, fill = "q4"), alpha = 0.25)+
-  geom_ribbon(data = d, aes(x = doy, ymax = qt1, ymin = paramMin, fill = "q5"), alpha = 0.25)+ #adding shaded ribbons for quantiles
+  labs(x = "Day of Year", y = yLab, color = "Legend", title = unique(d$siteParam), fill = "Percentiles")+ #axis and legend lables
+  geom_ribbon(data = d, aes(x = doy, ymax = paramMax, ymin = qt4, fill = "90-100th"))+
+  geom_ribbon(data = d, aes(x = doy, ymax = qt4, ymin = qt3, fill = "70-90th"))+
+  geom_ribbon(data = d, aes(x = doy, ymax = qt3, ymin = qt2, fill = "30-70th"))+
+  geom_ribbon(data = d, aes(x = doy, ymax = qt2, ymin = qt1, fill = "10-30th"))+
+  geom_ribbon(data = d, aes(x = doy, ymax = qt1, ymin = paramMin, fill = "0-10th"))+ #adding shaded ribbons for quantiles
     scale_fill_manual(values = fill.pal)+
-    guides(fill = "none")+
+      geom_line(data = filter(d, year(date) == dateMaxes[[i]]), aes(x = doy, y = paramDaily, color = as.character(dateMaxes[[i]])), size = 0.75)+ #filter out this year's data and add to plot
+
+    #guides(fill = "none")+
   theme_classic()+ #removing background formatting
   theme(legend.position = "bottom", #re positioning legend along bottom
-        axis.text = element_text(size = 10), 
-        axis.title = element_text(size = 10, face = "bold"), 
-        legend.text = element_text(size = 9), 
-        legend.title = element_text(size = 9, face = "bold"), 
-        plot.title = element_text(size = 11, face = "bold")) #axis and legend text formatting
+        axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        legend.text = element_text(size = 10), 
+        legend.title = element_text(size = 10, face = "bold"), 
+        plot.title = element_text(size = 12, face = "bold"),
+         #legend.key = element_rect(fill = alpha(fill.pal, 0.25))
+        ) #axis and legend text formatting
+    
   
   plot.list[[i]]<-p #Save plot as "ith" plot in plot list
   
@@ -447,66 +493,238 @@ for(i in 1:length(allSiteParams)){
 Check outputs: 
 
 ```{r}
-plot.list[[1]]
+plot.list[[5]]
 ```
 
-### NOT USED: Manually read in and clean data files with r
+## IV. Basic Stats
 
-Make list of all data files in data folder (includes all sites + parameters listed above):
+### A. Annual Trend Analyses
+
+Data Prep: 
 
 ```{r}
-#fileNames <- list.files(here("data"), full.names = T)
+yearData <- dailyData%>%
+  mutate(year = year(date))%>% #create year column
+  group_by(siteParam, year, parameter, unit)%>% #group by site/parameter and year
+  summarise(annualTot = sum(paramDaily, na.rm = T), 
+            annualMax = max(paramDaily, na.rm = T), 
+            annualMin = min(paramDaily, na.rm = T), 
+            annualMean = mean(paramDaily, na.rm = T), 
+            annualMed = median(paramDaily, na.rm = T), #calculate annual total, max, min, mean, and median for each site/param
+            maxDate = date[which.max(paramDaily)], 
+            minDate = date[which.min(paramDaily)])%>% #extract date for maximum and minimum values
+  mutate(annualTot = ifelse(parameter == "Precipitation", annualMax, annualTot)) #correcting precip data (already cumulative)
 ```
 
-Read in data and store in a list: 
+Basic LM for annual total x year:
+
+First, nest data based on site: 
 
 ```{r}
-#dataList <- list() #empty list to receive data
-#mdList <- list() #empty list to receive metadata
-
-
-#for(i in 1:length(fileNames)){ #loop over fileNames vector
-#  mdTemp<-read.csv(fileNames[i], col.names = c("C1")) #read in "ith" file
-  
-#  mdTemp1<-mdTemp%>% 
-#    mutate(rownum = c(1:nrow(mdTemp)))%>% #add rownum column
- #   filter(rownum == 11 | rownum == 57 |rownum == 65)%>% #extract desired metadata rows (station name, parameter name)
-  #  mutate(metadata = substr(C1, 9, nchar(C1)))%>% #remove "# Name:" from beginning of metadata entries
-   # select(metadata, rownum)%>% #drop extra cols
-   # pivot_wider(names_from = rownum, values_from = metadata)%>% #pivot wider to get columns for site name and parameter 
-   # rename(site = 1, parameter = 2, units =3)%>% #add column names
-   # mutate(dataRef = i) #add reference column for later merge
-  
-#  mdList[[i]] <- mdTemp1 #store as "ith" item in metadata list
-  
- # dataList[[i]]<-read.csv(fileNames[i], skip = 81)%>% #read in "ith" file, skipping 81 lines of metadata
-  #  mutate(dataRef = i)%>% #add reference column for merge with metadata
-   # mutate(date = substr(ResultTime, 1, 10), #extract date from ResultTime column
-    #       time = substr(ResultTime, 12, 19), #extract time from ResultTime column
-     #      dateTime = ymd_hms(paste(date, time, sep = " ")))%>% #create new dateTime column in POSIXct format
-    #rename(parameterValue = Result)%>% #rename result column
-#    select(parameterValue, ResultQualifiers, dateTime, dataRef) #drop extra cols
-#}
-
-
-#head(dataList[[10]]) #check outputs
-#head(mdList[[10]])
-
+yearNested <- yearData %>%
+  nest(data = -siteParam) #create new nested dataframe with one column for site, one column for data - data entries for each site include year and mean temp. 
 ```
 
-## NOT USED Combine data files for easier plotting
+Next, run a model for each site separately and return a summary table with the results for each site:
 
 ```{r}
-#mdAll <-mdList%>%
- # bind_rows()#rbind all metadata files into 1 DF
-#dataAll <-dataList%>%
-#  bind_rows()#rbind all data files into 1 DF
-
-#fullData <- merge(mdAll, dataAll) #merge metadata and data by dataRef column 
-
-#head(fullData)
-#tail(fullData)
+yearModels <- yearNested %>%
+  mutate(model = map(data, ~lm(annualTot~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+yearModels
 ```
+
+
+
+NOT RUN: Plotting - annual total: 
+
+
+annual.plots <- list()
+
+
+for(i in 1:length(allSiteParams)){
+  df <- filter(yearData, siteParam == allSiteParams[i])
+  
+  pv <- yearModels$p.value[i]
+  
+  y.l <- paste("Total annual", unique(df$parameter), "," ,unique(df$unit), sep = " ")
+  
+  pl <- ggplot(df, aes(x = year, y = annualTot))+
+    geom_point()+
+    geom_smooth(se = T, method = "lm", linetype = "dashed", color = "darkgrey")+
+    theme_classic()+
+    labs(x = "Year", y = y.l, title = allSiteParams[[i]])+
+    geom_text(aes(
+      y = (0.9*max(df$annualTot, na.rm = T)), 
+      x = (0.9*max(df$year, na.rm = T)),
+      label = paste("P=", round(pv, 3), sep = "")))
+  
+  annual.plots[[i]]<-pl
+  
+  print(paste("Finished", allSiteParams[[i]]))
+  
+}
+
+Data prep for facet plot:
+
+```{r}
+#Data prep: 
+
+yearPlot <- merge(yearData, yearModels)
+
+pVals <- yearPlot%>%
+  group_by(siteParam)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2))
+
+climateStations <- filter(yearPlot, str_detect(siteParam, "Climate"))
+streamStations <- filter(yearPlot, !str_detect(siteParam, "Climate"))
+
+```
+
+Plotting for climate stations:
+
+```{r}
+#Plotting - Climate Stations:
+
+climate.plot <- ggplot(climateStations, aes(x = year, y = annualTot))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed", color = "darkgrey")+
+  theme_classic()+
+  labs(x = "Year", y = "Total annual value")+
+  geom_text(data = filter(pVals, str_detect(siteParam, "Climate")), aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteParam, scales = "free")+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"))
+
+
+climate.plot
+
+#Save plot: 
+
+ggsave("Annual_Climate_Totals.jpg", climate.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
+```
+
+Plotting for stream stations: 
+
+```{r}
+
+stream.plot <- ggplot(streamStations, aes(x = year, y = annualTot))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed", color = "darkgrey")+
+  theme_classic()+
+  labs(x = "Year", y = "Total annual value")+
+  geom_text(data = filter(pVals, !str_detect(siteParam, "Climate")), aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteParam, scales = "free", nrow = 3, ncol = 2)+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"))
+
+
+stream.plot
+
+#Save plot:
+ggsave("Annual_Stream_Totals.jpg", stream.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 11, width = 12)
+```
+
+
+### B. Individual Variable Analyses:
+
+For each primary variable, measures of interest include: 
+
+- **Discharge:**
+  + Total annual discharge
+  + Timing of peak discharge
+  + Mean annual discharge
+- **Stream Temperature:**
+  + Annual average stream temperature
+  + "Degree days" over a certain threshold - maybe 20C?
+  + Average Late Summer Stream Temp (July-Aug?)
+- **Precip:**
+  + Total annual precip
+- **Air Temperature**
+  + Average annual air temperature
+  + "Degree days" over a certain threshold?
+  + Average seasonal temps: Winter (December-February), Spring (March-May), Summer(June-August), Fall (September-November)
+- **SWE:**
+  + Peak SWE
+  + Date of peak SWE
+  + "Meltout time": # days between peak SWE and zero SWE
+  
+#### i. Discharge:
+
+First, extract data and calculate total annual discharge, mean annual discharge, and timing of peak discharge; reorganize for analysis and plotting:
+
+```{r}
+discharge <- yearData%>%
+  filter(parameter == "Discharge")%>% #extract discharge data from prev. calculated annual min, mean, max, etc. 
+  mutate(maxDOY =yday(maxDate))%>% #add day of year for max discharge
+  select(siteParam, year, parameter, unit, annualTot, annualMean, maxDOY)%>%
+  pivot_longer(!c(siteParam, year, parameter, unit), names_to = "metricName", values_to = "metricValue")
+```
+
+Nest data for modeling:  
+
+```{r}
+dischargeNest <- discharge %>%
+  nest(data = -c(siteParam, metricName)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+qModels <- dischargeNest %>%
+  mutate(model = map(data, ~lm(metricValue~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+qModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+dischargePV <- merge(discharge, 
+                     select(qModels,siteParam, metricName, p.value)
+                     )%>%
+  mutate(metricPrint = case_when(
+    metricName == "annualMean"~ "Mean Annual Discharge, cfs", 
+    metricName == "annualTot" ~"Total Annual Discharge, cfs", 
+    metricName == "maxDOY" ~"Max. Discharge Day of Year"
+  ))%>%
+  mutate(site = str_remove(siteParam, "Discharge"), 
+         siteMetric = paste(site, metricPrint, sep = "- "))
+
+qPVs <- dischargePV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2))
+```
+
+Draw plots: 
+
+```{r}
+q.plot <- ggplot(dischargePV, aes(x = year, y = metricValue, color = metricPrint))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Metric Value", color = "Metric")+
+  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen"))+
+  geom_text(data = qPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+
+q.plot
+
+#Save plot:
+ggsave("Discharge_metrics.jpg", q.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
 
 
 
