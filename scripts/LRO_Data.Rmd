@@ -379,6 +379,11 @@ swe <- ggplot(loganSnotel, aes(x = date, y = snow_water_equivalent, color = site
         legend.title = element_text(size = 10, face = "bold"), 
         strip.text = element_text(size = 10, face = "bold"))
 swe
+
+#Save: 
+
+ggsave("SWE_Comb.jpg", swe, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
+
 ```
 
 
@@ -725,7 +730,660 @@ q.plot
 ggsave("Discharge_metrics.jpg", q.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
 ```
 
+#### ii. Stream Temperature
+
+First, extract data and calculate annual average stream temperature, # days with average temp >20C, and average July-Aug stream temp; reorganize for analysis and plotting:
+
+```{r}
+streamTemp <- dailyData%>%
+  filter(parameter == "Surface Water Temperature")%>% #extract discharge data from prev. calculated annual min, mean, max, etc. 
+  mutate(month = month(date),
+         year = year(date), 
+         summerT = ifelse(month == 7|month ==8, paramDaily, NA), 
+         over20 = ifelse(paramDaily >20, 1, 0))%>%
+  group_by(siteParam, year, parameter, unit)%>%
+  summarize(stMean = mean(paramDaily, na.rm =T), 
+            stSummer = mean(summerT, na.rm = T), 
+            stDegDay = sum(over20, na.rm = T)
+            )%>%
+  pivot_longer(!c(siteParam, year, parameter, unit), names_to = "metricName", values_to = "metricValue")
+```
+
+Nest data for modeling:  
+
+```{r}
+stNest <- streamTemp %>%
+  nest(data = -c(siteParam, metricName)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+stModels <- stNest %>%
+  mutate(model = map(data, ~lm(metricValue~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+stModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+streamTempPV <- merge(streamTemp, 
+                     select(stModels,siteParam, metricName, p.value)
+                     )%>%
+  mutate(metricPrint = case_when(
+    metricName == "stMean"~ "Mean Annual Stream Temperature, C", 
+    metricName == "stSummer" ~"Mean July-Aug Stream Temperature, C", 
+    metricName == "stDegDay" ~"# days with mean stream temperature >20 C"
+  ))%>%
+  mutate(site = str_remove(siteParam, "Surface Water Temperature"), 
+         siteMetric = paste(site, metricPrint, sep = "- "))
+
+stPVs <- streamTempPV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2))
+```
+
+Draw plots: 
+
+```{r}
+st.plot <- ggplot(streamTempPV, aes(x = year, y = metricValue, color = metricPrint))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Metric Value", color = "Metric")+
+  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen"))+
+  geom_text(data = stPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
 
 
+st.plot
+
+#Save plot:
+ggsave("StreamTemp_metrics.jpg", st.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+#### iii. Precip:
+  + Total annual precip
+  + Total annual precip on days with temp <32F (proxy for snow vs. rain)
+  
+First, extract precip data and calculate total annual precip, total precip on days with temp <32F (proxy for snow). 
+
+```{r}
+sites <- fullData%>%
+  mutate(siteParam = paste(site, parameter, sep = " "))%>%
+  select(site, siteParam)%>%
+  unique() #extract site names
+
+
+precip <- merge(dailyData, sites)%>% #add site names 
+  filter(parameter == "Air Temperature"|parameter == "Precipitation")%>% #extract precip and air temp data
+  pivot_wider(id_cols = c(site, date), names_from = parameter, values_from = paramDaily)%>% #get cols for each parameter
+  mutate(year = year(date))%>%
+  rename(airTemp = 3)%>%
+  arrange(site, date)%>%
+  mutate(siteYr = paste(site, year, sep = " ")) #add year column, re-arrange for calculations, add site+year column
+  
+precipSplit <- split(precip, precip$siteYr) #split into list of DF's for each site+year combo
+
+precipLag <- list() #empty list to recieve new values
+
+for(i in 1:length(precipSplit)){
+  x <- precipSplit[[i]]%>%
+    mutate(dailyPrecip = (Precipitation-lag(Precipitation)))
+  
+  precipLag[[i]]<-x #use for loop to calculate daily precip (current day precip minus previous day precip) for each site + year combo
+}
+
+precipComb <- bind_rows(precipLag)%>%
+  mutate(dailyPrecip = ifelse(dailyPrecip<0, 0, dailyPrecip))%>% #set negative daily precip values to zero
+  mutate(coldPrecip = ifelse(airTemp <0, dailyPrecip, 0))%>% #cold precip column - 0 precip if air temp >0, otherwise precip column value
+  group_by(site, year)%>%
+  summarise(totPrecip = max(Precipitation, na.rm = T), 
+            totCold = sum(coldPrecip, na.rm = T))%>% #calculate total annual precip + total cold precip for each site+year combo
+  mutate(totCold = ifelse(totCold == 0, NA, totCold))%>% #set 0 tot cold values to NA (no air temp values)
+  pivot_longer(!c(site, year), names_to = "metricName", values_to = "metricValue") #pivot longer for analysis and plotting. 
+```
+
+Nest data for modeling:  
+
+```{r}
+precipNest <- precipComb %>%
+  nest(data = -c(site, metricName)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+pcModels <- precipNest %>%
+  mutate(model = map(data, ~lm(metricValue~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+pcModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+precipPV <- merge(precipComb, 
+                     select(pcModels,site, metricName, p.value)
+                     )%>%
+  mutate(metricPrint = case_when(
+    metricName == "totPrecip"~ "Total Annual Precipitation, cm", 
+    metricName == "totCold" ~"Total Annual Precip. on Days <0C, cm"))%>%
+  mutate(siteMetric = paste(site, metricPrint, sep = "- "))
+
+pcPVs <- precipPV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2))
+```
+
+Draw plots: 
+
+```{r}
+pc.plot <- ggplot(precipPV, aes(x = year, y = metricValue, color = metricPrint))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Metric Value", color = "Metric")+
+  scale_color_manual(values = c("cyan4", "darkblue"))+
+  geom_text(data = pcPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+
+pc.plot
+
+#Save plot:
+ggsave("Precip_metrics.jpg", pc.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+
+#### iv. Air Temperature 
+  + Average annual air temperature
+  + "Degree days" over a certain threshold?
+  + Average seasonal temps: Winter (December-February), Spring (March-May), Summer(June-August), Fall (September-November)
+
+**NOTE - Currently have winter temperature as Jan-Feb + December of same CALENDAR year, preferable to have December (year 1)- Feb (year 2).** 
+
+First, extract data and calculate annual average stream temperature, # days with average temp >20C, and average July-Aug stream temp; reorganize for analysis and plotting:
+
+```{r}
+airTemp <- dailyData%>%
+  filter(parameter == "Air Temperature")%>% #extract discharge data from prev. calculated annual min, mean, max, etc. 
+  mutate(month = month(date),
+         year = year(date), 
+         winterT = ifelse(month == 1|month ==2| month == 12, paramDaily, NA),
+         springT = ifelse(month == 3|month == 4| month == 5, paramDaily, NA),
+         summerT = ifelse(month ==6|month == 7|month ==8, paramDaily, NA),
+         fallT = ifelse(month == 9|month == 10|month == 11, paramDaily, NA),
+         over25 = ifelse(paramDaily >25, 1, 0))%>%
+  group_by(siteParam, year, parameter, unit)%>%
+  summarize(atMean = mean(paramDaily, na.rm =T), 
+            atWinter = mean(winterT, na.rm =T), 
+            atSpring = mean(springT, na.rm = T), 
+            atSummer = mean(summerT, na.rm = T), 
+            atFall = mean(fallT, na.rm = T),
+            atDegDay = sum(over25, na.rm = T)
+            )%>%
+  pivot_longer(!c(siteParam, year, parameter, unit), names_to = "metricName", values_to = "metricValue")
+```
+
+Nest data for modeling:  
+
+```{r}
+atNest <- airTemp %>%
+  nest(data = -c(siteParam, metricName)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+atModels <- atNest %>%
+  mutate(model = map(data, ~lm(metricValue~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+atModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+airTempPV <- merge(airTemp, 
+                     select(atModels,siteParam, metricName, p.value)
+                     )%>%
+  mutate(metricPrint = case_when(
+    metricName == "atMean"~ "Mean Annual Air Temperature, C", 
+    metricName == "atWinter"~"Mean Jan/Feb/Dec Air Temperature, C",
+    metricName == "atSpring"~"Mean Mar-May Air Temperature, C", 
+    metricName == "atFall"~"Mean Sep-Nov Air Temperature, C",
+    metricName == "atSummer" ~"Mean Jun-Aug Air Temperature, C", 
+    metricName == "atDegDay" ~"# days with mean Air temperature >25 C"
+  ))%>%
+  mutate(site = str_remove(siteParam, "Air Temperature"), 
+         siteMetric = paste(metricPrint, site, sep = "- "))
+
+atPVs <- airTempPV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2))
+```
+
+Draw plots: 
+
+```{r}
+at.pal<-c("#E0F3DB","#CCEBC5", "#A8DDB5", "#7BCCC4","#4EB3D3","#2B8CBE")
+
+at.plot <- ggplot(airTempPV, aes(x = year, y = metricValue, color = metricPrint))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Metric Value", color = "Metric")+
+  scale_color_manual(values = at.pal)+
+  geom_text(data = atPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+
+at.plot
+
+#Save plot:
+ggsave("AirTemp_metrics.jpg", at.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+#### v. **SWE:**
+  + Peak SWE
+  + Date of peak SWE
+  + "Meltout time": # days between peak SWE and zero SWE
+  
+First, extract data and calculate annual peak swe, date of peak swe, and # days between peak SWE and zero SWE; reorganize for analysis and plotting:
+
+```{r}
+snow <- loganSnotel%>%
+  mutate(year = year(date))%>%
+  group_by(site_name, year, description)%>%
+  summarise(sweMax = max(snow_water_equivalent, na.rm = T), 
+            sweMaxDOY = yday(date[which.max(snow_water_equivalent)]), 
+            sweZero = yday(date[which.min(snow_water_equivalent)][1]), 
+            nDays = length(unique(date)))%>%
+  filter(!nDays<365)%>%
+  mutate(meltDays = sweZero-sweMaxDOY)%>%
+  mutate(meltDays = ifelse(meltDays<0, NA, meltDays))%>%
+  select(-c(nDays,sweZero))%>%
+  pivot_longer(!c(site_name, year, description), names_to = "metricName", values_to = "metricValue")
+```
+
+Nest data for modeling:  
+
+```{r}
+snowNest <- snow %>%
+  nest(data = -c(site_name, metricName)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+snowModels <- snowNest %>%
+  mutate(model = map(data, ~lm(metricValue~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+snowModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+snowPV <- merge(snow, 
+                     select(snowModels,site_name, metricName, p.value)
+                     )%>%
+  mutate(metricPrint = case_when(
+    metricName == "sweMax"~ "Maximum Snow Water Equivalent, cm", 
+    metricName == "sweMaxDOY" ~"Max Snow Water Equivalent Day of Year, C", 
+    metricName == "meltDays" ~"# days between peak SWE and 0 SWE"
+  ))%>%
+  mutate(siteMetric = paste(site_name, metricPrint, sep = "- "))
+
+sPVs <- snowPV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2))
+```
+
+Draw plots: 
+
+```{r}
+snow.plot <- ggplot(snowPV, aes(x = year, y = metricValue, color = metricPrint))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Metric Value", color = "Metric")+
+  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen"))+
+  geom_text(data = sPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+
+snow.plot
+
+#Save plot:
+ggsave("Snow_metrics.jpg", snow.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+## V. SNOTEL vs. Streamflow Metrics
+
+### A. How does Max SWE at each SNOTEL site correlate with total annual discharge? 
+
+Data prep: 
+
+```{r}
+snotelMerge <- snow%>%
+  select(site_name, year, metricName, metricValue)%>%
+  filter(metricName == "sweMax")%>%
+  pivot_wider(id_cols = year, names_from = site_name, values_from = metricValue)%>%
+  rename(klondikeSWE = 2, 
+         templeForkSWE = 3, 
+         tonyGroveLakeSWE = 4, 
+         tonyGroveRsSWE = 5) #data wrangling to get dataframe with row for each year, columns for max SWE reading at each snotel station
+
+qMerge <- discharge%>%
+  select(siteParam, year, metricName, metricValue)%>%
+  filter(metricName == "annualTot")%>%
+  mutate(site = str_remove(siteParam, "Discharge"))%>%
+  select(-siteParam)%>%
+  pivot_wider(id_cols = year, names_from = site, values_from = metricValue)%>%
+  rename(
+    loganAtMainCFS = 2, 
+    loganAtMendonCFS = 3, 
+    loganAtFbCFS = 4
+  ) #data wrangling to get dataframe with row for each year, columns for total annual discharge readings for each LRO site
+
+lroSnotel <- merge(snotelMerge, qMerge)%>%
+  pivot_longer(-c(year, loganAtMainCFS, loganAtMendonCFS, loganAtFbCFS), names_to = "snotelSite", values_to = "maxSWE") #merge, pivot longer for analysis and plotting
+```
+
+**Analysis/basic LM's: How does each SNOTEL site correlate with discharge?**
+
+Nest data: 
+
+```{r}
+stQNest <- lroSnotel %>%
+  nest(data = -c(snotelSite)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+#### i. SNOTEL sites vs. Logan River at Franklin Basin
+
+Run model for each SNOTEL site vs. discharge at Franklin Basin:
+
+```{r}
+stQFb <- stQNest %>%
+  mutate(model = map(data, ~lm(loganAtFbCFS~maxSWE, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "maxSWE")  #remove intercept term to just get info on year for each site
+stQFb
+```
+Add P-values for plotting: 
+
+```{r}
+stQFbPV <- merge(lroSnotel, 
+                     select(stQFb, snotelSite, p.value)
+                     )
+
+fbPVs <- stQFbPV%>%
+  group_by(snotelSite)%>%
+  summarize(x = mean(loganAtFbCFS), label = round(unique(p.value), 2))
+```
+
+Draw plots: 
+
+```{r}
+fb.plot <- ggplot(stQFbPV, aes(x = loganAtFbCFS, y = maxSWE, color = snotelSite))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Logan River at Franklin Basin - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
+  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "lightblue"))+
+  geom_text(data = fbPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+
+fb.plot
+
+#Save plot:
+ggsave("FranklinBasin_SNOTEL.jpg", fb.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+#### ii. SNOTEL sites vs. Logan River at Main St
+
+Run model for each SNOTEL site vs. discharge at Main St.:
+
+```{r}
+stQMain <- stQNest %>%
+  mutate(model = map(data, ~lm(loganAtMainCFS~maxSWE, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "maxSWE")  #remove intercept term to just get info on year for each site
+stQMain
+```
+Add P-values for plotting: 
+
+```{r}
+stQMainPV <- merge(lroSnotel, 
+                     select(stQMain, snotelSite, p.value)
+                     )
+
+mainPVs <- stQMainPV%>%
+  group_by(snotelSite)%>%
+  summarize(x = mean(loganAtMainCFS), label = round(unique(p.value), 2))
+```
+
+Draw plots: 
+
+```{r}
+main.plot <- ggplot(stQMainPV, aes(x = loganAtMainCFS, y = maxSWE, color = snotelSite))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Logan River at Main St. - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
+  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "lightblue"))+
+  geom_text(data = mainPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+
+main.plot
+
+#Save plot:
+ggsave("MainSt_SNOTEL.jpg", main.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+#### iii. SNOTEL sites vs. Logan River at Mendon
+
+Run model for each SNOTEL site vs. discharge at Mendon:
+
+```{r}
+stQMendon <- stQNest %>%
+  mutate(model = map(data, ~lm(loganAtMendonCFS~maxSWE, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "maxSWE")  #remove intercept term to just get info on year for each site
+stQMendon
+```
+
+Add P-values for plotting: 
+
+```{r}
+stQMendonPV <- merge(lroSnotel, 
+                     select(stQMendon, snotelSite, p.value)
+                     )
+
+mendonPVs <- stQMendonPV%>%
+  group_by(snotelSite)%>%
+  summarize(x = mean(loganAtMendonCFS), label = round(unique(p.value), 2))
+```
+
+Draw plots: 
+
+```{r}
+mendon.plot <- ggplot(stQFbPV, aes(x = loganAtMendonCFS, y = maxSWE, color = snotelSite))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Logan River at Mendon - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
+  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "lightblue"))+
+  geom_text(data = mendonPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+
+mendon.plot
+
+#Save plot:
+ggsave("Mendon_SNOTEL.jpg", mendon.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+### B. How does max SWE at all sites together correlate with streamflow? 
+
+Basic concept = multi-variate linear model with all four snotel sites for each discharge monitoring station. 
+
+Data prep: 
+
+```{r}
+lroStWide <- lroSnotel%>%
+  pivot_wider(id_cols = c(year, loganAtFbCFS, loganAtMainCFS, loganAtMendonCFS), names_from = snotelSite, values_from = maxSWE)
+```
+
+#### i. Multivariate model for Franklin Basin
+
+Fit model: 
+
+```{r}
+fb.multivariate <- lm(loganAtFbCFS~klondikeSWE+templeForkSWE+tonyGroveLakeSWE+tonyGroveRsSWE, data = lroStWide)
+```
+
+Summary: 
+
+```{r}
+summary(fb.multivariate)
+```
+
+**Result:** multivariate model does much worse than individual sites (Klondike, Tony Grove RS) - no siginificant correlation. 
+
+#### i. Multivariate model for Main Street
+
+Fit model: 
+
+```{r}
+main.multivariate <- lm(loganAtMainCFS~klondikeSWE+templeForkSWE+tonyGroveLakeSWE+tonyGroveRsSWE, data = lroStWide)
+```
+
+Summary: 
+
+```{r}
+summary(main.multivariate)
+```
+
+**Result:** multivariate model worse than individual models. 
+
+#### i. Multivariate model for Mendon
+
+Fit model: 
+
+```{r}
+mendon.multivariate <- lm(loganAtMendonCFS~klondikeSWE+templeForkSWE+tonyGroveLakeSWE+tonyGroveRsSWE, data = lroStWide)
+```
+
+Summary: 
+
+```{r}
+summary(mendon.multivariate)
+```
+
+**Result:** Multivariate model does better than the other two, but still not as good as single sites on their own - only Tony Grove Lake is a significant predictor. 
+
+### C. How does basin-wide (all SNOTEL sites) mean max SWE correlate with total annual Q at each site? 
+
+Data prep: 
+
+```{r}
+lroStNest <- lroStWide%>%
+  pivot_longer(-c(year, klondikeSWE, templeForkSWE, tonyGroveLakeSWE, tonyGroveRsSWE), names_to = "lroSite", values_to = "totalAnnualQ")%>% #pivot longer for easier analysis and plotting by LRO site
+  group_by(year)%>%
+  mutate(maxSWEXbar = mean(c(klondikeSWE, templeForkSWE, tonyGroveLakeSWE, tonyGroveRsSWE)))%>% #calculate mean Max SWE across all four SNOTEL sites
+  ungroup()%>%
+  nest(data=!lroSite) #ungroup, nest by LRO site for modeling
+```
+
+Modeling: 
+
+```{r}
+meanSWEmods <- lroStNest %>%
+  mutate(model = map(data, ~lm(totalAnnualQ~maxSWEXbar, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "maxSWEXbar")  #remove intercept term to just get info on year for each site
+meanSWEmods
+```
+
+Add P-values, prep for plotting: 
+
+```{r}
+lroStPlot <- lroStNest%>%
+  unnest()%>%
+  merge(select(meanSWEmods, lroSite, p.value))
+
+lroStPV <- lroStPlot%>%
+  group_by(lroSite)%>%
+  summarize(x = mean(totalAnnualQ), label = round(unique(p.value), 2))
+```
+
+Draw plots: 
+
+```{r}
+meanSwe.plot <- ggplot(lroStPlot, aes(x = totalAnnualQ, y = maxSWEXbar, color = lroSite))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Total Annual Discharge, CFS", y = "Mean Peak Snow Water Equivalent, cm", color = "Snotel Site")+
+  scale_color_manual(values = c("cyan2", "cyan3", "cyan4"))+
+  geom_text(data = lroStPV, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~lroSite, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+
+meanSwe.plot
+
+#Save plot:
+ggsave("MeanSWE_AnnualQ.jpg", meanSwe.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
 
 
