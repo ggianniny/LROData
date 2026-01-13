@@ -12,7 +12,7 @@ library(snotelr)
 py_require("pip")
 py_require("hydroserverpy")
 py_require("datetime")
-
+use_python("/Library/Frameworks/Python.framework/Versions/3.14/bin/python3", required = T)
 
 knitr::opts_knit$set(root.dir = here("outputs", "htmls"))
 ```
@@ -165,7 +165,7 @@ Setup:
 
 ```{python}
 #Read "to download" dataframe into Python environment
-pyDownload = pd.DatFrame(r.pyDownload)
+pyDownload = pd.DataFrame(r.pyDownload)
 
 #initialize empty dataframe to receive data: 
 
@@ -190,8 +190,8 @@ Convert full data file back to R for additional wrangling and analysis; replace 
 ```{r}
 fullData <- py_to_r(py$fullData)%>%
   rename(parameterValue = result, dateTime = phenomenon_time, parameter = param)%>% #renaming columns
-  mutate(dateTime = ymd_hms(dateTime), #convert date time to POSIXct
-         parameterValue = ifelse(parameterValue == -9999, NA, parameterValue)) #replace "no data" value o f-9999 with NA
+  mutate(parameterValue = ifelse(parameterValue == -9999, NA, parameterValue))%>% #replace "no data" value o f-9999 with NA
+  mutate(dateTime = ymd_hms(dateTime))#convert date time to POSIXct
 ```
 
 Check date ranges for each site: 
@@ -199,8 +199,8 @@ Check date ranges for each site:
 ```{r}
 dateRanges <- fullData%>%
   group_by(site, parameter)%>%
-  summarise(start = min(dateTime), 
-            end = max(dateTime))
+  summarise(start = min(dateTime, na.rm = T), 
+            end = max(dateTime, na.rm = T))
 dateRanges
 ```
 
@@ -237,20 +237,31 @@ Get metadata for sites in the Logan River Watershed:
 
 ```{r}
 snotelSites <- snotel_info(network="sntl")%>%
-  filter(str_detect(description, "Logan")|str_detect(description, "Temple"))
+  filter(str_detect(description, "Logan")|str_detect(description, "Temple")) #filter out sites in Logan River Watershed
 
 lro_siteIds <- c(snotelSites$site_id)
+
+snotelAll <- snotel_info(network="sntl")%>%
+  filter(county == "Cache"|county=="Rich"|county=="Franklin"|county=="Bear Lake") #Info for sites in Cache, Rich, Franklin, and Bear Lake counties
+
+all_siteIds <- c(snotelAll$site_id)
 ```
 
 NOTE - currently NOT including USU Doc Daniel (on drainage divide between Logan and Garden City sides) or Little Bear (S End of Cache Valley)
 
-Download data for all sites: 
+Download data for all sites in the logan watershed: 
 
 ```{r}
 loganSnotel <- snotel_download(site_id = lro_siteIds, network = "sntl", internal = T)%>%
   mutate(date = ymd(date), site_name= as.factor(site_name))
 ```
 
+Data for all sites in the logan watershed + surrounding counties:
+
+```{r}
+allSnotel <- snotel_download(site_id = all_siteIds, network = "sntl", internal = T)%>%
+  mutate(date = ymd(date), site_name = as.factor(site_name))
+```
 
 ## II. Time Series Plots
 
@@ -1386,4 +1397,212 @@ meanSwe.plot
 ggsave("MeanSWE_AnnualQ.jpg", meanSwe.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
 ```
 
+## VI. SNOTEL sites relevancy analysis
 
+Goal = check all Snotel sites in the greater logan area for effectiveness at predicting streamflow in the Logan. 
+
+Data prep: 
+
+```{r}
+snotelAll_merge <- allSnotel%>%
+  mutate(year = year(date))%>% #add year column
+  group_by(site_name, year)%>%
+  summarise(sweMax = max(snow_water_equivalent), 
+            sweMean = mean(snow_water_equivalent)) #calculate max and mean SWE for each site/year
+```
+
+Merge with LRO discharge data:
+
+```{r}
+snotelAllLro <- merge(snotelAll_merge, qMerge)%>%
+  mutate(siteCode = as.numeric(site_name))
+```
+
+
+### A. All SNOTEL sites vs. Logan at Franklin Basin
+
+Modeling with a for-loop: 
+
+```{r}
+sites <- unique(snotelAllLro$site_name)
+FbModelResults <- tibble()
+
+for(i in 1:length(sites)){
+  d <- filter(snotelAllLro, site_name == sites[i])
+  mod <- lm(loganAtFbCFS~sweMax, data = d)
+  modSum <-c(sites[i],glance(mod))
+  
+  FbModelResults<-rbind(modSum, FbModelResults)
+  
+  colnames(FbModelResults) <- c("siteCode", names(glance((mod))))
+}
+
+siteInfo <- snotelAllLro%>%
+  select(site_name, siteCode)%>%
+  distinct()
+
+FbModelResults <- FbModelResults%>%
+  merge(siteInfo, all = F)%>%
+  arrange(adj.r.squared)
+```
+
+Add R2 values for plotting: 
+
+```{r}
+FbStPlot <- snotelAllLro%>%
+  merge(select(FbModelResults, site_name, adj.r.squared))
+
+FbStR2 <- FbStPlot%>%
+  group_by(site_name)%>%
+  summarize(x = mean(loganAtFbCFS), label = round(unique(adj.r.squared), 2))
+```
+
+Draw plots:
+
+
+```{r}
+FbSt.Plot <- ggplot(FbStPlot, aes(x = loganAtFbCFS, y = sweMax, color = site_name))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Logan River at Franklin Basin -- Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
+  #scale_color_manual(values = c("cyan2", "cyan3", "cyan4"))+
+  geom_text(data = FbStR2, aes(x = x, label = paste("R2=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~site_name, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+
+FbSt.Plot
+
+#Save plot:
+ggsave("Fb_SnotelAnalysis.jpg", FbSt.Plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+
+### B. All SNOTEL sites vs. Logan at Main St
+
+Modeling with a for-loop: 
+
+```{r}
+sites <- unique(snotelAllLro$site_name)
+MainModelResults <- tibble()
+
+for(i in 1:length(sites)){
+  d <- filter(snotelAllLro, site_name == sites[i])
+  mod <- lm(loganAtMainCFS~sweMax, data = d)
+  modSum <-c(sites[i],glance(mod))
+  
+  MainModelResults<-rbind(modSum, MainModelResults)
+  
+  colnames(MainModelResults) <- c("siteCode", names(glance((mod))))
+}
+
+siteInfo <- snotelAllLro%>%
+  select(site_name, siteCode)%>%
+  distinct()
+
+MainModelResults <- MainModelResults%>%
+  merge(siteInfo, all = F)%>%
+  arrange(adj.r.squared)
+```
+
+Add R2 values for plotting: 
+
+```{r}
+MainStPlot <- snotelAllLro%>%
+  merge(select(MainModelResults, site_name, adj.r.squared))
+
+MainStR2 <- MainStPlot%>%
+  group_by(site_name)%>%
+  summarize(x = mean(loganAtMainCFS), label = round(unique(adj.r.squared), 2))
+```
+
+Draw plots:
+
+
+```{r}
+MainSt.Plot <- ggplot(MainStPlot, aes(x = loganAtMainCFS, y = sweMax, color = site_name))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Logan River at Main St. -- Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
+  #scale_color_manual(values = c("cyan2", "cyan3", "cyan4"))+
+  geom_text(data = MainStR2, aes(x = x, label = paste("R2=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~site_name, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+
+MainSt.Plot
+
+#Save plot:
+ggsave("Main_SnotelAnalysis.jpg", MainSt.Plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+
+### C. All SNOTEL sites vs. Logan at Mendon St
+
+Modeling with a for-loop: 
+
+```{r}
+sites <- unique(snotelAllLro$site_name)
+MendonModelResults <- tibble()
+
+for(i in 1:length(sites)){
+  d <- filter(snotelAllLro, site_name == sites[i])
+  mod <- lm(loganAtMendonCFS~sweMax, data = d)
+  modSum <-c(sites[i],glance(mod))
+  
+  MendonModelResults<-rbind(modSum, MendonModelResults)
+  
+  colnames(MendonModelResults) <- c("siteCode", names(glance((mod))))
+}
+
+siteInfo <- snotelAllLro%>%
+  select(site_name, siteCode)%>%
+  distinct()
+
+MendonModelResults <- MendonModelResults%>%
+  merge(siteInfo, all = F)%>%
+  arrange(adj.r.squared)
+```
+
+Add R2 values for plotting: 
+
+```{r}
+MendonStPlot <- snotelAllLro%>%
+  merge(select(MendonModelResults, site_name, adj.r.squared))
+
+MendonStR2 <- MendonStPlot%>%
+  group_by(site_name)%>%
+  summarize(x = mean(loganAtMendonCFS), label = round(unique(adj.r.squared), 2))
+```
+
+Draw plots:
+
+
+```{r}
+MendonSt.Plot <- ggplot(MendonStPlot, aes(x = loganAtMendonCFS, y = sweMax, color = site_name))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Logan River at Mendon -- Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
+  #scale_color_manual(values = c("cyan2", "cyan3", "cyan4"))+
+  geom_text(data = MendonStR2, aes(x = x, label = paste("R2=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~site_name, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+
+MendonSt.Plot
+
+#Save plot:
+ggsave("Mendon_SnotelAnalysis.jpg", MendonSt.Plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
+```
