@@ -8,6 +8,8 @@ library(here)
 library(reticulate)
 library(patchwork)
 library(snotelr)
+library(zoo)
+library(dataRetrieval)
 
 py_require("pip")
 py_require("hydroserverpy")
@@ -90,16 +92,17 @@ for i in range(0, len(datastreams.items)):
 
 #### ii. Filter out desired sites/parameters
 
-First - convert to python, filter out quality controlled data, create reference DF's
+First - convert to r, filter out quality controlled data, create reference DF's
 
 ```{r}
 r_df <- py_to_r(py$df)%>% #converting to R for easier wrangling
-  filter(procLevel == "Quality controlled data"|procLevel == "Derived products")%>% #extract quality controlled and derived product data only
+  #filter(procLevel == "Quality controlled data"|procLevel == "Derived products")%>% #extract quality controlled and derived product data only
   arrange(name, property)%>% #sort by name and unit for easier viewing
   mutate(name = as.factor(name), 
          property = if_else(property == "Temperature", paste(medium, property, sep = " "), property), 
          property = if_else(str_detect(propCode, "WaterYr"), paste(property, "WaterYr", sep = " "), property),
          property = if_else(str_detect(propCode, "Discharge"), propCode, property),
+         property = if_else(unit=="cubic feet per second", paste(property, "_cfs", sep =""), property),
          property = as.factor(property))%>%
   mutate(siteNum = as.numeric(name), 
          propNum = as.numeric(property))
@@ -126,7 +129,10 @@ View(nameRef)
 Enter desired site numbers below: 
 
 ```{r}
-soi <- c(5,6,15,16,19) #ENTER DESIRED SITE NUMBERS HERE inside the parentheses. e.g. if you want sites 1, 3, and 19, the code should read "soi <- c(1, 3, 19)"
+soi <- c(7,8,15,19,20,21, 22, 23,26) #ENTER DESIRED SITE NUMBERS HERE inside the parentheses. e.g. if you want sites 1, 3, and 19, the code should read "soi <- c(1, 3, 19)"
+
+#check correct sites selected:
+nameRef[soi,]
 ```
 
 View property references:
@@ -138,7 +144,10 @@ View(propRef)
 Enter desired property numbers below:
 
 ```{r}
-poi <- c(1,3,11,23) #ENTER DESIRED PROPERTY NUMBERS HERE inside the parentheses. e.g. if you want properties 8, 17, and 21, the code should read "soi <- c(8, 17, 21)"
+poi <- c(1,6,12,37) #ENTER DESIRED PROPERTY NUMBERS HERE inside the parentheses. e.g. if you want properties 8, 17, and 21, the code should read "soi <- c(8, 17, 21)"
+
+#check correct properties selected:
+propRef[poi,]
 ```
 
 Extract desired metadata:
@@ -148,10 +157,19 @@ Extract desired metadata:
 toDownload <- r_df %>%
   filter(
     siteNum %in% soi&propNum %in% poi
-  )
+  )%>% #extract sites/properties listed above
+  mutate(siteProp = paste(name, property, sep =" "))%>% #add site + property column
+  mutate(procLevelCode = case_when(
+    procLevel == "Quality controlled data"~1, 
+    procLevel == "Provisional data" ~2, 
+    procLevel == "Raw data" ~3
+  ))%>%
+  arrange(name, property, procLevelCode)%>%
+  mutate(dups = duplicated(siteProp))%>% #flag duplicated site+properties
+  filter(!(dups == T & (procLevel == "Raw data"|procLevel == "Provisional data"))) #remove raw data datastreams for all sites that have quality controlled or provisional data
 
 #Check to ensure all sites/data are present: 
-View(toDownload)
+#View(toDownload)
 
 #convert back to Python for download: 
 
@@ -172,6 +190,7 @@ pyDownload = pd.DataFrame(r.pyDownload)
 fullData = pd.DataFrame(data = None, index = None, columns = ['phenomenon_time', 'result', 'site','param', 'unit']) #initialize empty dataframe (outside loop)
 ```
 
+
 Read in all data using a For loop - NOTE, this will take a while to run (~2-4 min per site)
 
 ```{python}
@@ -191,25 +210,236 @@ Convert full data file back to R for additional wrangling and analysis; replace 
 fullData <- py_to_r(py$fullData)%>%
   rename(parameterValue = result, dateTime = phenomenon_time, parameter = param)%>% #renaming columns
   mutate(parameterValue = ifelse(parameterValue == -9999, NA, parameterValue))%>% #replace "no data" value o f-9999 with NA
-  mutate(dateTime = ymd_hms(dateTime))#convert date time to POSIXct
+  select(!result_qualifier_codes)%>%
+  mutate(dateTime = as.POSIXct(dateTime, tz = "UTC", "%m-%d-%Y %H:%M:%S"))#convert date time to POSIXct
+
+```
+
+##### a. Calculate Wood Camp Spring; add back to dataset
+
+```{r}
+wcDat <- fullData%>%
+  filter(site == "Logan River at Wood Camp Bridge"|site=="Logan River Above Wood Camp")%>% #extract above and below WC sites
+  filter(parameter == "Discharge_cfs")%>% #extract discharge values
+  select(dateTime, site, parameter, unit, parameterValue)%>% #drop extra columns
+  pivot_wider(id_cols = c(dateTime, parameter, unit), names_from = site, values_from = parameterValue)%>% #pivot to get columns w/ discharge for each site
+  rename(aboveWc = 4, wcBridge = 5)%>% #renaming cols
+  mutate(woodCampSpring = wcBridge-aboveWc)%>% #calculate spring discharge 
+  mutate(wcsCor = ifelse(woodCampSpring<0, NA, woodCampSpring))
+
+#Check data with quick time series:
+
+ggplot(wcDat, aes(x = dateTime, y = woodCampSpring))+
+  geom_line()+
+  labs(x = "Date", y = "Wood Camp Spring discharge, cfs")+
+  theme_classic()
+
+#Plot has a substantial number of negative values (i.e. recorded discharge at WC bridge lower than above WC... WTF?) - checking some of these:
+
+length(which(wcDat$woodCampSpring<0))
+
+wcDat[30915:30925,]
+wcDat[31545:31555,]
+
+# No obvious pattern - for now, iteravely replace with average of adjacent values until no more negatives remain (takes a while to run): 
+
+while(length(which(wcDat$woodCampSpring<0))>0){
+  wcDat<-wcDat%>%
+    mutate(woodCampSpring = ifelse(woodCampSpring<0, #If woodcamp spring is <0
+                                 ((lag(woodCampSpring)+lead(woodCampSpring))/2), #replace with average of adjacent rows
+                                 woodCampSpring #Else leave as is. 
+                                 ))
+  
+  print(paste(length(which(wcDat$woodCampSpring<0)), "negatives remaining", sep = " "))
+}
+
+
+#check if successful:
+length(which(wcDat$woodCampSpring<0)) #Seems to have gotten rid of all negatives. Spot checking lines from above:
+
+wcDat[30915:30925,]
+wcDat[31545:31555,]
+
+#Replaced everything, but still results in some very low values. Compare plot of replaced values vs. NA replacement:
+
+(ggplot(wcDat, aes(x = dateTime, y = wcsCor))+
+  geom_line()+
+  labs(x = "Date", y = "Wood Camp Spring discharge, cfs", title = "Replaced with NA")+
+  theme_classic())|(ggplot(wcDat, aes(x = dateTime, y = woodCampSpring))+
+  geom_line()+
+  labs(x = "Date", y = "Wood Camp Spring discharge, cfs", title = "Filled")+
+  theme_classic())
+
+#Use filled data for now - but will have some artificially low values. 
+
+wcFinal <- wcDat%>%
+  select(dateTime, parameter, unit, woodCampSpring)%>% #drop extra cols
+  mutate(site = rep("Wood Camp Spring", nrow(wcDat)))%>% #add site name
+  rename(parameterValue = woodCampSpring) #rename for rbind with maind data
+
+#add back to full dataset: 
+
+fullData_wc <- rbind(fullData, wcFinal)%>%
+  filter(!(site == "Logan River at Wood Camp Bridge"|site=="Logan River Above Wood Camp"))
+```
+
+#### iv. Adding Logan River @ First Dam and Highline Canal
+
+Read in data from USGS - NOTE current USGS API function only supports calling up to 3yrs of data at a time, so using a for-loop to pull and concatenate all data back to 1986 - takes a while to run. 
+
+```{r}
+sitesUSGS <- c("USGS-10109000", "USGS-10108400") #USGS site ID's for Logan River at 1st Dam and Highline Canal
+USGSparam <- "00060"#parameter code for discharge
+dataPeriod <- c(seq.Date(from = "1986-10-01", to = Sys.Date(), by = "year"), NA) #make vector of start/end dates to use in loop
+USGSdat <- data.frame() #set up empty dataframe to recieve data
+
+#read in data with for loop: 
+
+for(i in 1:length(dataPeriod)){
+  d <- read_waterdata_continuous(monitoring_location_id = sitesUSGS, 
+                                        parameter_code = USGSparam, #target sites and parameter identified above
+                                       time = c(dataPeriod[i], dataPeriod[(i+1)]) #setting data period - using 1-year increments
+                                       )
+  USGSdat <- rbind(USGSdat, d) #rbind i'th year's data to USGSdat dataframe
+  
+  print(paste("finished", year(dataPeriod[i]), sep = " ")) #print year finished for tracking. 
+}
+
+#check for success:
+
+head(USGSdat)
+tail(USGSdat)
+```
+
+Next, drop unneeded columns and calculate total discharge for first dam (first dam + highline canal) for each date/time. 
+
+```{r}
+USGSpivot <- USGSdat%>%
+  select(monitoring_location_id, time, value)%>% #extract site, time, and value columns
+  distinct()%>% #drop duplicate rows
+  pivot_wider(id_cols = time, names_from = monitoring_location_id, values_from = value)%>% #pivot wider to get rows for each dateTime, columns with values for each site
+  mutate(`USGS-10108400` = ifelse(is.na(`USGS-10108400`), 0, `USGS-10108400`)) #replace NA values in Highline with 0's
+
+
+loganAtFirstDam <- USGSpivot%>%
+  mutate(parameterValue = `USGS-10108400`+`USGS-10109000`, 
+         site = rep("Logan River at First Dam", nrow(USGSpivot)), 
+         parameter = rep("Discharge_cfs", nrow(USGSpivot)), 
+         unit = rep("cubic feet per second", nrow(USGSpivot)))%>%
+  rename(dateTime = time)%>%
+  select(!c(`USGS-10108400`, `USGS-10109000`))
+```
+
+NOTE - switched from hourly readings to readings every 15min - check when switch was made:
+
+```{r}
+obsPerYear <- loganAtFirstDam%>%
+  mutate(year = year(dateTime))%>%
+  group_by(year)%>%
+  summarize(nObs = n())
+
+View(obsPerYear)
+```
+
+First year with 15min intervals is **1995**. All data from 1989-1994 is in 1hr intervals. 
+
+Add Logan at First Dam to overall dataset: 
+
+```{r}
+fullData_usgs <- rbind(fullData_wc, loganAtFirstDam)
 ```
 
 Check date ranges for each site: 
 
 ```{r}
-dateRanges <- fullData%>%
+dateRanges <- fullData_usgs%>%
   group_by(site, parameter)%>%
   summarise(start = min(dateTime, na.rm = T), 
-            end = max(dateTime, na.rm = T))
+            end = max(dateTime, na.rm = T))%>%
+  mutate(minDoy = yday(start), 
+         maxDoy = yday(end))
 dateRanges
 ```
 
-#### iv. Alternative formatting for DOY plotting:
+#### v. Data Cleaning + QA/QC
+
+First QA/QC Step: identifying partial years; create second dataset with only full years of data
+
+```{r}
+fullData_partial <- fullData_usgs%>%
+  mutate(year=year(dateTime), 
+         doy = yday(dateTime))%>% #add columns for year and day of year
+  group_by(site, parameter, year)%>%
+  mutate(doyMax = max(doy, na.rm = T), 
+         doyMin = min(doy, na.rm = T))%>% #calculate minimum and maxiumum day of year for each site + parameter
+  mutate(partialYear = ifelse((doyMax<365|doyMin>1), T, F))%>% #add T/F column flagging years with partial data (start day of year >1 or end day of year <365)
+  ungroup() #ungroup
+
+fullData_complete <- fullData_partial %>%
+  filter(!partialYear == T) #create new dataset with only complete years of data
+```
+
+Check full years (i.e. data for 1/1 and 12/31) for data gaps:
+
+```{r}
+dataGaps <- fullData_complete%>%
+  mutate(date = ymd(substr(dateTime, 1,10)))%>% #create new column with date
+  group_by(site, parameter, date, year)%>% #group by site/parameter/date
+  summarise(
+    dailyMean = mean(parameterValue) #calculate mean parameter value for each site/parameter/day - will set any day that includes NA data to NA
+  )%>%
+  mutate(dataPresent = ifelse(is.na(dailyMean), 0, 1))%>% #re-code days with NA data as 0, days with data as 1
+  group_by(site, parameter, year)%>%
+  summarise(dataDays = sum(dataPresent))%>% #group by year and calculate total # days with data for each site/parameter
+  mutate(missingDays = ifelse(dataDays == 366, (366-dataDays), (365-dataDays)), 
+         siteParam = paste(site, parameter, sep = " ")) #calculate # missing days, accounting for leap years; add site+parameter column
+  
+#View(dataGaps)
+```
+
+
+Data gap visualizations:
+
+```{r}
+dg.plot <- ggplot(dataGaps, aes(x = year, y = dataDays, fill = parameter))+
+  geom_bar(stat = "identity", position = "dodge")+
+  geom_hline(aes(yintercept = 365), colour = "darkgrey", linetype = "dashed")+ #add grey dashed line @ y = 365 days
+  geom_hline(aes(yintercept = 265), colour = "darkred", linetype = "dashed")+ #add red dashed line @ y = 265 days (>100 days missing)
+  facet_wrap(~site, scales = "free_x")+
+  labs(x = "Year", y = "# days with data recorded", fill = "Parameter")+
+  scale_fill_manual(values = c("cyan4", "darkblue", "cyan2", "lightblue"))+
+  theme_classic()+
+  theme(strip.text = element_text(size = 10, face = "bold"), 
+        axis.title = element_text(size = 10, face = "bold"), 
+        axis.text = element_text(size = 10))
+dg.plot
+
+#Save output: 
+
+ggsave("DataGaps.jpg", dg.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 6, width = 11)
+
+```
+
+Many years with >100 days of missing data for discharge at Franklin Basin and Rick's Spring, most other sites ok. Flag years with <100 missing days:
+
+```{r}
+dataGaps <- dataGaps%>%
+  mutate(flag = ifelse(missingDays>100, T, F)) #add flag column to mark years with >100 missing days
+```
+
+Add flags and missing days back into full dataset
+
+```{r}
+fullData_flagged <- merge(dataGaps,fullData_complete)
+```
+
+
+#### vi. Alternative formatting for DOY plotting:
 
 Alternative data format for DOY plots: 
 
 ```{r}
-dailyData <- fullData%>%
+dailyData <- fullData_usgs%>%
   mutate(parameter = ifelse(parameter == "Discharge_cfs", "Discharge", parameter),
     siteParam = paste(site, parameter, sep = " "))%>% #add new Site + parameter column for grouping
   mutate(doy = yday(dateTime), #make new DOY column
@@ -224,7 +454,8 @@ dailyData <- fullData%>%
          qt1 = quantile(paramDaily, probs = 0.1, na.rm = T)[[1]], 
          qt2 = quantile(paramDaily, probs = 0.3, na.rm = T)[[1]], 
          qt3 = quantile(paramDaily, probs = 0.7, na.rm = T)[[1]], 
-         qt4 = quantile(paramDaily, probs = 0.9, na.rm = T)[[1]], )%>% #calculate day of year minimum, maximum, median, and mean, plus quantiles for each doy
+         qt4 = quantile(paramDaily, probs = 0.9, na.rm = T)[[1]], 
+         year = year(date))%>% #calculate day of year minimum, maximum, median, and mean, plus quantiles for each doy
   ungroup()%>% #ungroup
   arrange(siteParam, date) #sort by site+parameter and date for easier checking
 ```
@@ -263,7 +494,7 @@ allSnotel <- snotel_download(site_id = all_siteIds, network = "sntl", internal =
   mutate(date = ymd(date), site_name = as.factor(site_name))
 ```
 
-## II. Time Series Plots
+## II. Basic Time Series Plots
 
 ### A. Discharge
 
@@ -272,11 +503,11 @@ Starting with a basic time series, y = discharge CFS, x = date Time, color = sit
 ```{r}
 #color palate: 
 
-discharge.pal <- c("#2171B5", "#08306B",  "#9ECAE1")
+discharge.pal <- c("#2171B5", "#08306B",  "#9ECAE1", "cyan3", "cyan4", "darkgreen")
 
 #Check with updated plot: 
 q.comb <- ggplot(
-  filter(fullData, parameter == "Discharge_cfs"), #extract discharge data
+  filter(fullData_usgs, parameter == "Discharge_cfs"), #extract discharge data
   aes(x = dateTime, y = parameterValue, color = site) #setting mapping
 )+
   geom_line()+
@@ -402,15 +633,17 @@ ggsave("SWE_Comb.jpg", swe, device = "jpeg", path = here("outputs", "plots"), un
 
 Using "dailyData" dataframe created in step I. 
 
+### A. Testing
+
 First, Test plotting day of year plot with one site - data prep: 
 
 ```{r}
 thisyear <- format(Sys.Date(), "%Y") #Create object with this year for later filtering
-test <- filter(dailyData, siteParam == "Climate Station at Franklin Basin Air Temperature") #make test dataset with one site/parameter
+test <- filter(dailyData, siteParam == "Climate Station at Franklin Basin Air Temperature")%>%
+  filter(!year<(max(year)-5))#make test dataset with one site/parameter
 
 datemin <- year(min(test$date))
 datemax <- year(max(test$date)) #Make date range object for labeling
-                   
 ```
 
 Plotting:
@@ -438,7 +671,11 @@ testplot <- ggplot()+
 testplot
 ```
 
-Success! Next, iterate over each site/parameter to make all plots: 
+Success! 
+
+### B. Make DOY Plots w/ For-Loop
+
+Next, iterate over each site/parameter to make all plots: 
 
 Setup: 
 
@@ -450,15 +687,18 @@ q.pal <- c("#0000FF35", "#ADD8E635", "#00FF0035", "#FFFF0035" ,"#FF000035")
 t.pal <- rev(q.pal)
 q.line <- c("black", "blue", "green", "red")
 t.line <- c("black", "red", "green", "blue") #set up color palate options
-dateMins <- year(dateRanges$start)
+
 dateMaxes <- year(dateRanges$end)
+dateMins <- dateMaxes-5
+  
 ```
 
 Make plots with a for-loop:
 
 ```{r}
 for(i in 1:length(allSiteParams)){
-  d <- filter(dailyData, siteParam == allSiteParams[i]) #Filter data to "ith" site/parameter
+  d <- filter(dailyData, siteParam == allSiteParams[i])%>% #Filter data to "ith" site/parameter
+    filter(!year<(max(year)-5))
 
   fill.pal <- if (str_detect(allSiteParams[[i]], "Temperature")) q.pal else t.pal
   line.pal <- if (str_detect(allSiteParams[[i]], "Temperature")) t.line else q.line
@@ -482,9 +722,8 @@ for(i in 1:length(allSiteParams)){
   geom_ribbon(data = d, aes(x = doy, ymax = qt3, ymin = qt2, fill = "30-70th"))+
   geom_ribbon(data = d, aes(x = doy, ymax = qt2, ymin = qt1, fill = "10-30th"))+
   geom_ribbon(data = d, aes(x = doy, ymax = qt1, ymin = paramMin, fill = "0-10th"))+ #adding shaded ribbons for quantiles
-    scale_fill_manual(values = fill.pal)+
-      geom_line(data = filter(d, year(date) == dateMaxes[[i]]), aes(x = doy, y = paramDaily, color = as.character(dateMaxes[[i]])), size = 0.75)+ #filter out this year's data and add to plot
-
+  scale_fill_manual(values = fill.pal)+
+  geom_line(data = filter(d, year(date) == dateMaxes[[i]]), aes(x = doy, y = paramDaily, color = as.character(dateMaxes[[i]])), linewidth = 0.75)+ #filter out this year's data and add to plot
     #guides(fill = "none")+
   theme_classic()+ #removing background formatting
   theme(legend.position = "bottom", #re positioning legend along bottom
@@ -506,12 +745,12 @@ for(i in 1:length(allSiteParams)){
   print(paste("Finished", allSiteParams[[i]], sep = " ")) #Print site name/parameter for tracking
 }
 ```
+
 Check outputs: 
 
 ```{r}
-plot.list[[5]]
+plot.list[[7]]
 ```
-
 ## IV. Basic Stats
 
 ### A. Annual Trend Analyses
@@ -678,7 +917,8 @@ discharge <- yearData%>%
   filter(parameter == "Discharge")%>% #extract discharge data from prev. calculated annual min, mean, max, etc. 
   mutate(maxDOY =yday(maxDate))%>% #add day of year for max discharge
   select(siteParam, year, parameter, unit, annualTot, annualMean, maxDOY)%>%
-  pivot_longer(!c(siteParam, year, parameter, unit), names_to = "metricName", values_to = "metricValue")
+  pivot_longer(!c(siteParam, year, parameter, unit), names_to = "metricName", values_to = "metricValue")%>%
+  filter(!is.na(year))
 ```
 
 Nest data for modeling:  
@@ -757,7 +997,8 @@ streamTemp <- dailyData%>%
             stSummer = mean(summerT, na.rm = T), 
             stDegDay = sum(over20, na.rm = T)
             )%>%
-  pivot_longer(!c(siteParam, year, parameter, unit), names_to = "metricName", values_to = "metricValue")
+  pivot_longer(!c(siteParam, year, parameter, unit), names_to = "metricName", values_to = "metricValue")%>%
+  filter(!is.na(year))
 ```
 
 Nest data for modeling:  
@@ -859,7 +1100,8 @@ precipComb <- bind_rows(precipLag)%>%
   summarise(totPrecip = max(Precipitation, na.rm = T), 
             totCold = sum(coldPrecip, na.rm = T))%>% #calculate total annual precip + total cold precip for each site+year combo
   mutate(totCold = ifelse(totCold == 0, NA, totCold))%>% #set 0 tot cold values to NA (no air temp values)
-  pivot_longer(!c(site, year), names_to = "metricName", values_to = "metricValue") #pivot longer for analysis and plotting. 
+  pivot_longer(!c(site, year), names_to = "metricName", values_to = "metricValue")%>% #pivot longer for analysis and plotting. 
+  filter(!is.na(year))
 ```
 
 Nest data for modeling:  
@@ -947,7 +1189,8 @@ airTemp <- dailyData%>%
             atFall = mean(fallT, na.rm = T),
             atDegDay = sum(over25, na.rm = T)
             )%>%
-  pivot_longer(!c(siteParam, year, parameter, unit), names_to = "metricName", values_to = "metricValue")
+  pivot_longer(!c(siteParam, year, parameter, unit), names_to = "metricName", values_to = "metricValue")%>%
+  filter(!is.na(year))
 ```
 
 Nest data for modeling:  
@@ -1015,7 +1258,7 @@ at.plot
 ggsave("AirTemp_metrics.jpg", at.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
 ```
 
-#### v. **SWE:**
+#### v. SWE:
   + Peak SWE
   + Date of peak SWE
   + "Meltout time": # days between peak SWE and zero SWE
@@ -1144,21 +1387,21 @@ Run model for each SNOTEL site vs. discharge at Franklin Basin:
 ```{r}
 stQFb <- stQNest %>%
   mutate(model = map(data, ~lm(loganAtFbCFS~maxSWE, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
-                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
-  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
-  filter(term == "maxSWE")  #remove intercept term to just get info on year for each site
+                     glance))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) #%>% #unnest model column to get rows for each site, columns for model metrics
+  #filter(term == "maxSWE")  #remove intercept term to just get info on year for each site
 stQFb
 ```
 Add P-values for plotting: 
 
 ```{r}
 stQFbPV <- merge(lroSnotel, 
-                     select(stQFb, snotelSite, p.value)
+                     select(stQFb, snotelSite, adj.r.squared, p.value)
                      )
 
 fbPVs <- stQFbPV%>%
   group_by(snotelSite)%>%
-  summarize(x = mean(loganAtFbCFS), label = round(unique(p.value), 2))
+  summarize(x = mean(loganAtFbCFS), p.label = round(unique(p.value), 2), r.label = round(unique(adj.r.squared),2))
 ```
 
 Draw plots: 
@@ -1170,7 +1413,7 @@ fb.plot <- ggplot(stQFbPV, aes(x = loganAtFbCFS, y = maxSWE, color = snotelSite)
   theme_classic()+
   labs(x = "Logan River at Franklin Basin - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
   scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "lightblue"))+
-  geom_text(data = fbPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  geom_text(data = fbPVs, aes(x = x, label = paste("P=", p.label, ", ", "R2=", r.label)), y = Inf, vjust = 2)+
   facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
         axis.title = element_text(size = 11, face = "bold"), 
@@ -1191,21 +1434,21 @@ Run model for each SNOTEL site vs. discharge at Main St.:
 ```{r}
 stQMain <- stQNest %>%
   mutate(model = map(data, ~lm(loganAtMainCFS~maxSWE, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
-                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
-  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
-  filter(term == "maxSWE")  #remove intercept term to just get info on year for each site
+                     glance))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) #%>% #unnest model column to get rows for each site, columns for model metrics
+  #filter(term == "maxSWE")  #remove intercept term to just get info on year for each site
 stQMain
 ```
 Add P-values for plotting: 
 
 ```{r}
 stQMainPV <- merge(lroSnotel, 
-                     select(stQMain, snotelSite, p.value)
+                     select(stQMain, snotelSite, p.value, adj.r.squared)
                      )
 
 mainPVs <- stQMainPV%>%
   group_by(snotelSite)%>%
-  summarize(x = mean(loganAtMainCFS), label = round(unique(p.value), 2))
+  summarize(x = mean(loganAtMainCFS), p.label = round(unique(p.value), 2), r.label=round(unique(adj.r.squared), 2))
 ```
 
 Draw plots: 
@@ -1217,7 +1460,7 @@ main.plot <- ggplot(stQMainPV, aes(x = loganAtMainCFS, y = maxSWE, color = snote
   theme_classic()+
   labs(x = "Logan River at Main St. - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
   scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "lightblue"))+
-  geom_text(data = mainPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  geom_text(data = mainPVs, aes(x = x, label = paste("P=", p.label, ", ", "R2=", r.label)), y = Inf, vjust = 2)+
   facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
         axis.title = element_text(size = 11, face = "bold"), 
@@ -1238,9 +1481,9 @@ Run model for each SNOTEL site vs. discharge at Mendon:
 ```{r}
 stQMendon <- stQNest %>%
   mutate(model = map(data, ~lm(loganAtMendonCFS~maxSWE, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
-                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
-  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
-  filter(term == "maxSWE")  #remove intercept term to just get info on year for each site
+                     glance))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) #%>% #unnest model column to get rows for each site, columns for model metrics
+  #filter(term == "maxSWE")  #remove intercept term to just get info on year for each site
 stQMendon
 ```
 
@@ -1248,12 +1491,12 @@ Add P-values for plotting:
 
 ```{r}
 stQMendonPV <- merge(lroSnotel, 
-                     select(stQMendon, snotelSite, p.value)
+                     select(stQMendon, snotelSite, p.value, adj.r.squared)
                      )
 
 mendonPVs <- stQMendonPV%>%
   group_by(snotelSite)%>%
-  summarize(x = mean(loganAtMendonCFS), label = round(unique(p.value), 2))
+  summarize(x = mean(loganAtMendonCFS), p.label = round(unique(p.value), 2), r.label = round(unique(adj.r.squared), 2))
 ```
 
 Draw plots: 
@@ -1265,7 +1508,7 @@ mendon.plot <- ggplot(stQFbPV, aes(x = loganAtMendonCFS, y = maxSWE, color = sno
   theme_classic()+
   labs(x = "Logan River at Mendon - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
   scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "lightblue"))+
-  geom_text(data = mendonPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  geom_text(data = mendonPVs, aes(x = x, label = paste("P=", p.label, ", ", "R2=", r.label)), y = Inf, vjust = 2)+
   facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
         axis.title = element_text(size = 11, face = "bold"), 
@@ -1606,3 +1849,295 @@ MendonSt.Plot
 #Save plot:
 ggsave("Mendon_SnotelAnalysis.jpg", MendonSt.Plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
 ```
+
+## VII. Updated Analyses - Key Metrics for each site
+
+
+### A. Snowpack
+
+Key indicators of snowpack are: 
+
+  - Peak SWE amount 
+  - Peak SWE date
+  - Meltout timing (# days between peak SWE and zero SWE)
+
+Data needed for these variables: Need SNOTEL data for Jan 1 - June 1, should exclude years without data. 
+
+
+#### i. Peak SWE Amount, Date, and Meltout timing
+
+QA/QC: Extract SNOTEL data from Jan 1 to July 1 of each year; drop years with missing data during that time period
+
+Starting with key SNOTEL sites: 
+
+```{r}
+# Drop partial years
+SWEPeaks <- loganSnotel%>%
+  mutate(month = month(date),
+         year = year(date),
+         doy = yday(date))%>% #add month and day of year columns
+  mutate(waterYear = ifelse(month>=10, year+1, year))%>% #add water year column
+  group_by(site_name,year)%>%
+  mutate(doyMin = min(doy), 
+         doyMax = max(doy))%>% #calculate min and max DOY for each site/year
+  mutate(waterDOY = ifelse(doy>=doyMax-91, 
+                           doy-(doyMax-92), 
+                           doy+92)
+         )%>% # #use min/max Doy to calculate water day of year
+  group_by(site_name, waterYear)%>%
+  mutate(waterDoyMax = max(waterDOY), 
+         waterDoyMin = min(waterDOY))%>%
+  #filter(!(doyMin>1|waterDoyMax<274))%>% #drop years that start after Jan 1st or end before July 1st
+  select(site_name, date, year, doy,waterYear, waterDOY, month, snow_water_equivalent, waterDoyMin, waterDoyMax, doyMin, doyMax)#drop extra cols
+  
+
+#Check for missing data:
+print(paste("Number of NAs in dataframe:", length(which(is.na(SWEPeaks$snow_water_equivalent))), sep = " "))
+
+#Appear to be very few missing values. Drop from dataframe: 
+
+SWEPeaks <- SWEPeaks %>%
+  filter(!is.na(snow_water_equivalent)) #drop missing data
+```
+
+Next, calculate peak SWE amount, peak SWE date, and meltout days for each water year at each site
+
+```{r}
+sweStats <- SWEPeaks%>%
+  filter(!doyMin>1, !doyMax<182)%>% #drop years that start after jan 1 or end before jul 1
+  filter(doy>1&doy<182)%>% #extract Jan 1 to July 1
+  group_by(site_name, waterYear)%>% #group by site and year
+  summarise(sweMax = max(snow_water_equivalent, na.rm = T), 
+            sweMaxDOY = yday(date[which.max(snow_water_equivalent)]), 
+            sweZero = yday(date[which.min(snow_water_equivalent)][1]))%>% #calculate maximum SWE value, date of max SWE, and first day with 0 SWE recorded
+  mutate(meltDays = sweZero-sweMaxDOY)%>% #Calculate melt day duration by subtracting max SWE DOY from DOY of first day with 0 SWE
+ pivot_longer(!c(site_name, waterYear), names_to = "metricName", values_to = "metricValue")
+```
+
+Basic LM for each metric over time: 
+
+```{r}
+sweStatsNest <- sweStats %>%
+  nest(data = -c(site_name, metricName)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+sModels <- sweStatsNest %>%
+  mutate(model = map(data, ~lm(metricValue~waterYear, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "waterYear")  #remove intercept term to just get info on year for each site
+sModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+swePV <- merge(sweStats, 
+                     select(sModels, site_name, metricName, p.value)
+                     )%>%
+  mutate(metricPrint = case_when(
+    metricName == "sweMax" ~ "Maximum Recorded SWE, cm", 
+    metricName == "sweMaxDOY" ~"Day of year of max. recorded SWE", 
+    metricName == "sweZero" ~"First day of year w/ zero recorded SWE",
+    metricName == "meltDays" ~"Melt duration, days"
+  ))%>%
+  mutate(siteMetric = paste(site_name, metricPrint, sep = " - "))
+
+sPVs <- swePV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(waterYear), label = round(unique(p.value), 2))
+```
+
+Plotting:
+
+```{r}
+s.plot <- ggplot(swePV, aes(x = waterYear, y = metricValue, color = metricPrint))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Water Year", y = "Metric Value", color = "Metric")+
+  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "cyan3"))+
+  geom_text(data = sPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+
+s.plot
+
+#Save plot:
+ggsave("SWE_metrics.jpg", s.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+### B. Precip
+
+Key indicators for precip: 
+  - Total water year precip (OR total annual precip)
+  - Amount of precip, rain vs. snow
+
+Data Needs: 
+
+**For cumulative precip:** Need precip data for entire year - exclude partial years from analysis. Need to get rid of negative cumulative precip values first. 
+
+**For rain vs. snow**, Need Precip Data + Air temp data. Use empirical formula from Dai et al. 2008 (referenced in SI from YSL paper). 
+
+**Formulas:** 
+
+Snow Probability = -50 * [tanh(0.4 * ( Mean Temp – 1.75))] – 1
+
+WHERE: Mean Temp = mean of the maximum and minimum tempreatures on each day
+
+Snowfall amount = Snow Probability * Daily Precip total
+
+Rainfall amount = (1 - Snow Probability) * Daily Precip total OR Daily Precip total - Snowfall amount
+
+**Refrence**:
+
+Dai, A. 2008. Temperature and pressure dependence of the rain-snow phase transition over
+land and ocean. Geophys. Res. Lett. 35: L12802, doi:10.1029/2008GL033295
+
+#### i. Cumulative Precip
+
+*QA/QC:* Clean up data, merge LRO and SNOTEL datasets 
+
+  - Looks like the "year" for cumulative calculations re-sets at 7am on 1/1 of each year, not midnight - need to deal with these incorrect values. 
+  - Also have some negative cumulative precip values early in year
+  - When calculating measured precip, get some negative values - indicates error with cumulative precip. Need to get rid of errors and re-calculate precip cumulative. 
+
+```{r}
+#LRO Precip QA/QC:
+lroClimate <- fullData_complete%>%
+  filter(str_detect(site, "Climate"))%>% #Extract climate stations
+  select(dateTime, parameterValue, site, parameter)%>% #drop extra columns
+  pivot_wider(id_cols = c(dateTime, site), names_from = parameter, values_from = parameterValue)%>% #pivot wider to get columns for each variable
+  rename(site_name = 2, precipitation_cumulative = 4, airTemp = 3)%>% #renaming for merge
+  mutate(year = year(dateTime), doy = yday(dateTime), time = format(as.POSIXct(dateTime), "%H:%M:%S"))%>% #adding time, year, and doy columns
+  mutate(precipitation_cumulative = ifelse(doy==1&time<"07:00:00", 0, precipitation_cumulative))%>% #replacing carryover totals from prev. year with 0
+ mutate(precipitation_cumulative = ifelse(precipitation_cumulative<0, 0, precipitation_cumulative))%>% #replace negative cumulative precip values with 0
+  filter(!is.na(precipitation_cumulative))%>% #drop rows without cumulative precip values
+  group_by(year, site_name)%>% # group by year and site
+  mutate(precipitation = (precipitation_cumulative-lag(precipitation_cumulative)))%>% #calculate measured precip (current cumulative value minus previous cumulative value)
+  ungroup()%>%
+  mutate(precipitation = ifelse((is.na(precipitation)|precipitation<0), 0, precipitation))%>% #replace negative measured precip values with 0
+  group_by(year, site_name)%>% #group by year and site name again
+  mutate(precipCumulative_cor = cumsum(precipitation))%>% #re-calculate cumulative precip for each year with corrected daily precip values
+  mutate(precipCumulative_cor = ifelse(is.na(precipCumulative_cor), 0, precipCumulative_cor)) #Replace NA's created from cumsum fxn with 0
+
+#checking output
+check <- lroClimate%>%
+  group_by(site_name, year)%>% #group by site name and year
+  summarise(stated = max(precipitation_cumulative, na.rm = T), 
+            calc = sum(precipitation), 
+            cor = max(precipCumulative_cor))%>% #calculate stated, calculated, and corrected cumulative precip
+  mutate(diff = calc-stated, 
+         diffCor = calc-cor) #calculate differences between calculated and stated/corrected values
+
+#re-organize + calculations for merge with Snotel data: 
+
+lroClimateMerge <- lroClimate%>%
+  select(dateTime, site_name, airTemp, precipitation, precipCumulative_cor)%>%
+  mutate(date = ymd(substr(dateTime, 1, 10)))%>%
+  group_by(date, site_name)%>%
+  summarize(
+    precipitation_cumulative = max(precipCumulative_cor), 
+    precipitation = sum(precipitation), 
+    temperature_max = max(airTemp), 
+    temperature_min = min(airTemp), 
+    temperature_mean = mean(airTemp)
+  )%>%
+  arrange(site_name, date)
+
+#Extract climate data columns from SNOTEL data:
+
+snotelClimate <- loganSnotel%>%
+  select(site_name, date, precipitation_cumulative, precipitation, temperature_max, temperature_min, temperature_mean)
+
+#Merge: 
+
+precipFull <- rbind(lroClimateMerge, snotelClimate)%>%
+  mutate(temperature_mean = ifelse(temperature_mean == -99.9, NA, temperature_mean))
+```
+
+*Cumulative Precip Analysis:*
+
+Extract cumulative precip for each year; nest by site
+
+```{r}
+precipStats <- precipFull %>%
+  mutate(year = year(date))%>%
+  group_by(site_name, year)%>%
+  summarize(totPrecip = max(precipitation_cumulative))
+
+precipNest<-precipStats%>%
+  nest(data = -c(site_name))
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+pModels <- precipNest %>%
+  mutate(model = map(data, ~lm(totPrecip~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+pModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+precPV <- merge(precipStats, 
+                     select(pModels, site_name, p.value)
+                     )
+
+pPVs <- precPV%>%
+  group_by(site_name)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2))
+```
+
+Plotting:
+
+```{r}
+p.plot <- ggplot(precPV, aes(x = year, y = totPrecip, color = site_name))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Cumulative annual precip, cm", color = "Site")+
+  scale_color_manual(values = c("#7FCDBB" ,"#41B6C4" ,"#1D91C0" ,"#225EA8" ,"#253494" ,"#081D58"))+
+  geom_text(data = pPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~site_name, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+
+p.plot
+
+#Save plot:
+ggsave("cumulative_precip.jpg", s.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+#### ii. Snow vs. Rain
+
+Data prep & QA/QC - extract data with both air temp and precip; use empirical formula (Snow Probability = -50 * [tanh(0.4 * ( Mean Temp – 1.75))] – 1) to calculate snow ratio: 
+
+```{r}
+rainSnow <- precipFull%>%
+  filter(!(is.na(temperature_max)|is.na(temperature_min)))%>% #drop rows without max and min temp
+  mutate(temperature_mean = ((temperature_max+temperature_min)/2))%>% #re-calc mean daily temp to ensure consistency
+  mutate(snowProb = ((-50*tanh(0.4*(temperature_mean - 1.75)))-1))%>%
+  mutate(dailySnow = precipitation*snowProb, 
+         dailyRain = precipitation*(1-snowProb))%>%
+  mutate(precipCheck = dailySnow+dailyRain)
+```
+
+#STOPPING HERE ON 4/10 - Next steps are to: (1) Figure out and standardize units for SNOTEL data, (2) troubleshoot snow probability calculations - doesn't seem to be working correctly at the moment - ends up calculating some negative precip values, still add up correctly but not physically possible. 
+
+Snow Probability = -50 * [tanh(0.4 * ( Mean Temp – 1.75))] – 1
+
