@@ -10,6 +10,7 @@ library(patchwork)
 library(snotelr)
 library(zoo)
 library(dataRetrieval)
+library(cpop)
 
 py_require("pip")
 py_require("hydroserverpy")
@@ -2213,3 +2214,365 @@ rs.plot
 ggsave("RainSnow_metrics.jpg", rs.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 15)
 ```
 
+### C. Canyon Sites - Discharge Metrics
+
+Canyon sites are: Logan River at Franklin Basin, Wood Camp Spring, Rick's Spring, and Logan River at First Dam 
+
+Key metrics for canyon sites are: 
+
+  - Runoff start date
+  - Date of peak runoff
+  - Peak runoff value
+  - Runoff volume from Runoff start date thru Oct 1st. 
+  
+#### i. Data prep & QA/QC:
+
+Extract canyon discharge data, prep for initial checks/plots:
+
+```{r}
+canyonSites <- fullData_usgs%>%
+  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River")%>% #extract canyon sites
+  filter(parameter == "Discharge_cfs")%>% #extract discharge data
+  select(!c(parameter, unit))%>% #drop extra cols
+  rename(discharge_cfs = parameterValue)%>% #renaming cols
+  mutate(discharge_cfs = ifelse(discharge_cfs == 0, NA, discharge_cfs))%>%
+  mutate(year = year(dateTime), 
+         month = month(dateTime), 
+         doy = yday(dateTime), 
+         date = ymd(substr(dateTime, 1, 10)))%>% #extract year, month, and date
+  group_by(site, date, year, month, doy)%>%
+  summarise(discharge_cfs = mean(discharge_cfs, na.rm = T))%>% #group by date, calculate mean daily discharge
+  mutate(waterYear=ifelse(month<10, year, year+1), 
+         logDischarge = log10(discharge_cfs))%>%  #add water year column, add log10 discharge column.
+  group_by(site,year)%>% 
+  mutate(doyMin = min(doy), 
+         doyMax = max(doy))%>% #calculate min and max DOY for each site/year
+  mutate(waterDOY = ifelse(doy>=doyMax-91, 
+                           doy-(doyMax-92), 
+                           doy+92)
+         ) #use min/max Doy to calculate water day of year 
+
+
+summary(canyonSites$discharge_cfs)
+```
+
+Initial plot to check data availability: 
+
+```{r}
+ggplot(canyonSites, aes(x = date, y = discharge_cfs))+
+  geom_line()+
+  theme_classic()+
+  #scale_y_continuous(trans = "log10")+
+  facet_wrap(~site, scales = "free")
+```
+
+Spotty data for springs, looks like missing parts of peaks in some years. Quick summary of data availability:
+
+```{r}
+dataAv <- canyonSites %>% 
+  filter(!is.na(discharge_cfs))%>%
+  group_by(site, year)%>%
+  summarise(
+    dateMin = min(date, na.rm = T), 
+    dateMax = max(date, na.rm = T), 
+    doyMin = min(doy), 
+    doyMax = max(doy)
+  )
+dataAv
+```
+
+#### ii. Identify start of runoff for each site/year:
+
+Trying to find changepoints - test with Franklin Basin: 
+
+
+```{r}
+fbTest <- canyonSites%>%
+  filter(site=="Logan River near Franklin Basin"&date>="2022-01-01"&date<="2022-10-01")%>% #filter out data for Franklin Basin between Jan 1 and Oct 1 2023
+  filter(!is.na(discharge_cfs))
+
+#Plot to check for obvious step change(s):
+
+ggplot(fbTest, aes(x=doy, y =discharge_cfs))+
+  geom_line()+
+  theme_classic()
+```
+
+Attempt using cpop function:
+
+```{r}
+fb23.cpop <- cpop::cpop(fbTest$discharge_cfs, fbTest$doy, #providing y and x vectors for cpop function
+                    beta =80) #adjusting beta value to increase penalty for adding more changepoints (default of 2*log(length(y)) (~9.8) was returning CP's before major step-change)
+```
+
+Check results - plot, extract changepoint:
+
+```{r}
+plot(fb23.cpop)#+
+  #labs(title = unique(fbTest$site))
+changepoints(fb23.cpop)
+changepoints(fb23.cpop)[1,1]
+```
+
+First CP with beta set to 80 seems to be working well for years with good data availability, but will need to get rid of years with incomplete data. For now, dropping years that start after DOY 60 (March 1st)
+
+```{r}
+canyonSites_complete <- canyonSites%>%
+  mutate(siteYr = paste(site, year, sep = " "))%>% #add site year column for loop. 
+  mutate(discharge_cfs = ifelse(is.nan(discharge_cfs), NA, discharge_cfs))%>%
+  filter(!is.na(discharge_cfs))%>% #drop rows with missing discharge values
+  group_by(site, year)%>% #group by site and year
+  mutate(doyMin = min(doy), 
+         doyMax = max(doy))%>% #re-calculate DOY min and max with NA's removed
+  ungroup()%>%
+  filter(!doyMin>60, !doyMax<275) #drop years that start after march 1st or end before oct 1st. 
+```
+
+##### a. Iterate changepoint extraction over site/year with a for loop: 
+
+For loop to extract CP's and save plots for each site/year: 
+
+```{r}
+site.yrs <- unique(canyonSites_complete$siteYr) #vector with unique values of siteYr for iteration
+cps <- data.frame() #empty data frame to recieve changepoint data
+cp.plots <- list() #empty list to recieve cp plots
+
+#For loop: 
+
+for(i in 1:length(site.yrs)){
+  
+  d<-canyonSites_complete%>%
+    filter(siteYr == site.yrs[i])%>%#extract "ith" site/year combo
+    filter(!is.na(discharge_cfs))
+  
+  c<-cpop(d$discharge_cfs, d$doy, beta = 800)#feeding temperature data and doy into cpop, set beta to 80
+  cp<-changepoints(c)[1,1]#extract first changepoint
+  cpp<-plot(c)+ #draw plot of cp estimations
+    labs(title = site.yrs[i], x = "Day of year", y = "Discharge, cfs") #plot title + labels
+  
+  cpdf<-data.frame(unique(d$site), unique(d$year), cp) #create dataframe with site, year, and changepoint DOY
+  cps<-rbind(cps, cpdf) #append to cps dataframe
+  
+  cp.plots[[i]] <- cpp #store plot as "ith" item in plot list
+  
+  print(paste("Completed ", i, "/", length(site.yrs), sep = ""))
+}
+
+cps <- cps%>%
+  rename("site" = 1, "year" = 2, "cpDoy" = 3) #renaming cps columns for easier use later
+```
+
+Get references for plots for each site:
+
+```{r}
+siteRefs <- canyonSites_complete%>%
+  select(site, siteYr)%>% #extract site and siteyr column
+  distinct()%>% #drop duplicates
+  group_by(site)%>%
+  summarise(n = n()) #group by site, count # years
+siteRefs
+```
+
+*Check FB plots:* 
+
+```{r}
+(cp.plots[[39]]|cp.plots[[40]]|cp.plots[[41]])/(cp.plots[[42]]|cp.plots[[43]]|cp.plots[[44]])/(cp.plots[[45]]|cp.plots[[46]]|cp.plots[[47]])
+```
+
+First CP looks good with beta at 800 for all years.  
+
+*Check Ricks plots:* 
+
+```{r}
+(cp.plots[[48]]|cp.plots[[49]]|cp.plots[[50]])/(cp.plots[[51]]|cp.plots[[52]])
+```
+
+Beta at 800 works well. 
+
+*Check Wood Camp plots:* 
+
+```{r}
+(cp.plots[[53]]/cp.plots[[54]])
+```
+
+Both look good with Beta at 800
+
+*Spot Checking every 5yrs for First Dam*:
+
+```{r}
+(cp.plots[[1]]|cp.plots[[5]]|cp.plots[[10]])/(cp.plots[[15]]|cp.plots[[20]]|cp.plots[[25]])/(cp.plots[[30]]|cp.plots[[35]])
+```
+
+Beta at 800 works well, picks up actual peak instead of pre-peak squiggles. 
+
+##### b. Add 1st change point data back to main dataset
+
+Add 1st changepoint data to dataset: 
+
+```{r}
+canyonSites_cp <- merge(canyonSites_complete, cps)
+```
+
+
+Metrics of interest for each year are: 
+
+  - Changepoint day of year (already have)
+  - Peak runoff value & date
+  - Total runoff volume from CP DOY thru 10/1 *NOTE* - need to set threshold for # missing days before doing this calc. 
+  
+Work flow: 
+
+  - Extract data for CP1 thru 10/1 for each year
+  - Calcualte peak runoff value and date 
+  - Run models for these three metrics
+  - Drop years w/ >"X" missing days of data
+  - Calculate total runoff volume, plot over time.
+
+##### c. Peak runoff value/Peak runoff DOY/Runoff start DOY Analysis
+
+Extract data for runoff start to 10/1, calculate max discharge value and DOY, extract runoff start DOY
+  
+```{r}
+canyonMetrics <- canyonSites_cp%>%
+  group_by(siteYr)%>% #group by site/year
+  filter(!doy<cpDoy, !doy>(doyMax-92))%>% #drop data from before CP day of year and after Sep 30th (NOT including 10/1 currently)
+  ungroup()%>%
+  group_by(site, year)%>% #group by site and year
+  summarise(runoffStart = unique(cpDoy), 
+            runoffPeak = max(discharge_cfs, na.rm = T), 
+            peakDoy = doy[which.max(na.omit(discharge_cfs))])%>% #extract runoff start DOY, max discharge value, max discharge day of year for each site/year
+  pivot_longer(!c(site, year), names_to = "metricName", values_to = "metricValue")
+```
+
+Nest data:
+
+
+```{r}
+canyonNest <- canyonMetrics %>%
+  nest(data = -c(site, metricName)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+canyonModels <- canyonNest %>%
+  mutate(model = map(data, ~lm(metricValue~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+canyonModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+canyonPV <- merge(canyonMetrics, 
+                     select(canyonModels, site, metricName, p.value) #add p-values
+                     )%>%
+  mutate(metricPrint = case_when(
+    metricName == "runoffStart" ~ "Runoff start day of year", 
+    metricName == "runoffPeak" ~"Peak discharge, cfs", 
+    metricName == "peakDoy" ~"Peak discharge day of year" #add print-friendly metric name for plotting
+  ))%>%
+  mutate(siteMetric = paste(site, metricPrint, sep = " - ")) #add metric + site column for plotting
+
+cyPVs <- canyonPV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2)) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+canyon.plot <- ggplot(canyonPV, aes(x = year, y = metricValue, color = metricPrint))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Metric Value", color = "Metric")+
+  scale_color_manual(values = c("darkgreen","cyan4", "darkblue"))+
+  geom_text(data = cyPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+canyon.plot
+
+#Save plot:
+ggsave("CanyonSite_metrics.jpg", canyon.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+
+##### d. Runoff volume analysis
+
+First, drop years with >10% of data missing and calculate runoff volumes:
+
+```{r}
+runoff <- canyonSites_cp%>%
+  mutate(endDate = ymd(paste(year, "-09-30", sep = "")))%>% #add end date for later date re-filling
+  group_by(siteYr, site, year)%>% #group by site/year
+  filter(!doy<cpDoy, !doy>(doyMax-92))%>% #drop data from before CP day of year and after Sep 30th (NOT including 10/1 currently)
+  complete(date = seq.Date(min(date), max(endDate), by = "day"))%>% #add missing days back (removed to calculate CP's), fill with NAs
+  mutate(nMissing = length(which(is.na(discharge_cfs))), 
+         nDays = yday(max(endDate, na.rm = T))-max(cpDoy, na.rm = T))%>% #count # NA's per runoff period and total # days per runoff period
+  mutate(percMissing = nMissing/nDays)%>% #calculate % of data missing (# missing days/total days in runoff period)
+  ungroup()%>%
+  filter(!percMissing>0.1)%>% #drop years with >10% of data missing
+  group_by(site, year)%>%
+  summarize(runoffVol = sum(discharge_cfs, na.rm = T), 
+            runoffDays = unique(nDays)) #calculate total runoff volume for each year/site, runoff duration
+```
+
+Nest data:
+
+
+```{r}
+runoffNest <- runoff %>%
+  nest(data = -c(site)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+runoffModels <- runoffNest %>%
+  mutate(model = map(data, ~lm(runoffVol~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+runoffModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+runoffPV <- merge(runoff, 
+                     select(runoffModels, site, p.value) #add p-values
+                     )
+
+rfPVs <- runoffPV%>%
+  group_by(site)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2)) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+runoff.plot <- ggplot(runoffPV, aes(x = year, y = runoffVol, color = site))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Total runoff volume, cfs")+
+  scale_color_manual(values = c("cyan3","cyan4", "lightblue", "darkblue"))+
+  geom_text(data = rfPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+runoff.plot
+
+#Save plot:
+ggsave("Runoff_metrics.jpg", runoff.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
