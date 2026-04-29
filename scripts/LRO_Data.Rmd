@@ -2519,8 +2519,9 @@ runoff <- canyonSites_cp%>%
   mutate(percMissing = nMissing/nDays)%>% #calculate % of data missing (# missing days/total days in runoff period)
   ungroup()%>%
   filter(!percMissing>0.1)%>% #drop years with >10% of data missing
+  mutate(dischargeCf = discharge_cfs*60*12)%>% #calculate total cubic feet going by gauge for each day
   group_by(site, year)%>%
-  summarize(runoffVol = sum(discharge_cfs, na.rm = T), 
+  summarize(runoffVol = sum(dischargeCf, na.rm = T), 
             runoffDays = unique(nDays)) #calculate total runoff volume for each year/site, runoff duration
 ```
 
@@ -2562,7 +2563,7 @@ runoff.plot <- ggplot(runoffPV, aes(x = year, y = runoffVol, color = site))+
   geom_point()+
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
-  labs(x = "Year", y = "Total runoff volume, cfs")+
+  labs(x = "Year", y = "Total runoff volume, cubic feet")+
   scale_color_manual(values = c("cyan3","cyan4", "lightblue", "darkblue"))+
   geom_text(data = rfPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
   facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
@@ -2576,3 +2577,208 @@ runoff.plot
 #Save plot:
 ggsave("Runoff_metrics.jpg", runoff.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
 ```
+
+### D. Valley Sites - Discharge + Temperature Metrics
+
+Valley sites currently included are: 
+
+  - Water lab
+  - Main St Bridge
+  - Mendon Rd. 
+  
+For each site, metrics of interest are: 
+
+  - Total water year discharge
+  - Change in water year discharge between sites
+  - Discharge vs. Water Temperature 
+  
+#### i. Discharge Metrics
+
+##### a. Data prep & QA/QC
+
+First, need to extract Valley sites and drop any water years with significant missing data. 
+
+```{r}
+valleySites <- fullData_usgs%>%
+  filter(site=="Logan River at Main Street (Highway 89/91) Bridge"|site=="Logan River at the Utah Water Research Laboratory west bridge"|site=="Logan River at Mendon Road (600 South)")%>%
+  mutate(year = year(dateTime), 
+         month = month(dateTime), 
+         date = ymd(substr(dateTime, 1, 10)), 
+         doy = yday(dateTime))%>% #add year, month, date, and day of year columns
+  mutate(waterYear=ifelse(month<10, year, year+1))%>%  #Calculate water year column.
+  group_by(site,parameter, year)%>% #group by site, parameter, and year
+  mutate(doyMin = min(doy), 
+         doyMax = max(doy))%>% #calculate min and max DOY for each site/year
+  mutate(waterDOY = ifelse(doy>=doyMax-91, 
+                           doy-(doyMax-92), 
+                           doy+92)
+         )%>% #use min/max Doy to calculate water day of year 
+  ungroup()%>%
+  group_by(site, parameter, waterYear)%>% #group by site, parameter, and water year
+  mutate(waterDoyMin = min(waterDOY), 
+         waterDoyMax = max(waterDOY))%>% #Calculate min and max water day of year
+  ungroup()%>%
+  filter(!waterDoyMin>1, !waterDoyMax<365)%>% #drop years that start after water DOY 1 or end before water DOY 365
+  group_by(site, parameter, waterYear)%>%
+  mutate(nMissing = length(which(is.na(parameterValue))))%>%
+  mutate(percMissing = (nMissing/n())*100)%>% #calculate number of missing obs and percentage of missing obs per site/parameter/year
+  ungroup()
+
+#Quick summary of missing data: 
+
+valleyDataAv <- valleySites%>%
+  group_by(site, parameter, waterYear)%>%
+  summarise(missing = unique(nMissing), percMis = unique(percMissing))
+```
+
+Good data availability, but still some years with substantial missing data.For now, *dropping years with >3% missing data*. 
+
+Drop years with >3% missing, calculate discharge metrics:
+
+```{r}
+valleyDischarge <- valleySites%>%
+  filter(parameter=="Discharge_cfs", !percMissing>3)%>% #drop years with >3% missing data
+  select(!c(parameter, unit))%>% 
+  rename(dischargeCfs = parameterValue)%>% #dropping xtra cols, renaming
+  mutate(dischargeCf = dischargeCfs*15)%>% #calculate total cubic feet going by gauge for each 15sec interval
+  group_by(site, waterYear)%>% 
+  summarise(totDischarge = sum(dischargeCf, na.rm = T)) #calculate total water year discharge for each site
+```
+
+##### b. Total Annual Discharge analysis
+
+Nest data:
+
+
+```{r}
+valleyNest <- valleyDischarge %>%
+  nest(data = -c(site)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+valleyModels <- valleyNest %>%
+  mutate(model = map(data, ~lm(totDischarge~waterYear, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "waterYear")  #remove intercept term to just get info on year for each site
+valleyModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+valleyPV <- merge(valleyDischarge, 
+                     select(valleyModels, site, p.value) #add p-values
+                     )
+
+vaPVs <- valleyPV%>%
+  group_by(site)%>%
+  summarize(x = mean(waterYear), label = round(unique(p.value), 2)) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+valley.plot <- ggplot(valleyPV, aes(x = waterYear, y = totDischarge, color = site))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Water year", y = "Total water year discharge, cubic feet")+
+  scale_color_manual(values = c("cyan3","cyan4", "lightblue"))+
+  geom_text(data = vaPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+valley.plot
+
+#Save plot:
+ggsave("Valley_discharge.jpg", valley.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+##### c. Change in total annual discharge
+
+Data Prep/ QA/AC: Extract data for irrigation season; calculate amount of missing obs during irrigation season, drop years with >3% missing data, then calculate diversion amounts:
+
+```{r}
+diversion <- valleySites%>%
+  filter(doy>(doyMax-261), doy<(doyMax-91))%>% #extract  data for irrigation season (4/15-9/30) 
+  filter(parameter == "Discharge_cfs")%>% #extract discharge data
+  select(dateTime, parameterValue, site, waterYear)%>% #drop extra cols
+  pivot_wider(id_cols = c(dateTime, waterYear), names_from = site, values_from = parameterValue)%>% #pivot wider to get columns for each site
+  rename(mainSt = 3, mendon = 4, waterLab = 5)%>% #Renaming cols
+  mutate(waterLab_mendon = waterLab-mendon, 
+         waterLab_main = waterLab-mainSt, 
+         main_mendon = mainSt-mendon)%>% #calculate differences in discharge between each site for each dateTime
+  select(dateTime, waterYear, waterLab_main, waterLab_mendon, main_mendon)%>% #Dropping extra cols
+  pivot_longer(-c(dateTime, waterYear), names_to = "sites", values_to = "dischargeDif")%>% #pivot longer to get back to analysis-friendly format
+  group_by(sites, waterYear)%>% #group by site and water year
+  mutate(nMissing = length(which(is.na(dischargeDif))))%>%
+  mutate(percMissing = (nMissing/n())*100)%>% #re-calculate # missing and % missing obs
+  filter(!percMissing>3)%>% #drop seasons with >3% missing data
+  ungroup()%>%
+  mutate(dischargeCf = dischargeDif*15)%>% #calculate total discharge (cubic feet) going past gauge for each 15sec interval
+  group_by(sites, waterYear)%>% #group by site and water year
+  summarise(totQDiff = sum(dischargeCf, na.rm = T)) #Calculate total difference per irrigation season for each site/water year
+```
+
+Run analysis: 
+
+Nest data:
+
+
+```{r}
+diversionNest <- diversion %>%
+  nest(data = -c(sites)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+diversionModels <- diversionNest %>%
+  mutate(model = map(data, ~lm(totQDiff~waterYear, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "waterYear")  #remove intercept term to just get info on year for each site
+diversionModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+diversionPV <- merge(diversion, 
+                     select(diversionModels, sites, p.value) #add p-values
+                     )
+
+divPVs <- diversionPV%>%
+  group_by(sites)%>%
+  summarize(x = mean(waterYear), label = round(unique(p.value), 2)) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+diversion.plot <- ggplot(diversionPV, aes(x = waterYear, y = totQDiff, color = sites))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Water year", y = "Difference in irrigation season discharge, cubic feet")+
+  scale_color_manual(values = c("cyan3","cyan4", "lightblue"))+
+  geom_text(data = divPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~sites, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+diversion.plot
+
+#Save plot:
+ggsave("Valley_diversions.jpg", diversion.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+
