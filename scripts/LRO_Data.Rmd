@@ -2781,4 +2781,156 @@ diversion.plot
 ggsave("Valley_diversions.jpg", diversion.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
 ```
 
+### ii. Water Temperature Metrics
 
+#### a. Data prep & QA/QC
+
+First, extract years with both discharge and water temperature data avilable for July 1 - August 31; drop years with >5% missing temperature data. 
+
+```{r}
+valleyTemps <- valleySites %>%
+  filter(!doyMax<doyMax-122, !doyMin>doyMax-183)%>% #drop years that start after 7/1 or end before 8/31
+  filter(doy>=doyMax-183 & doy<=doyMax-122)%>% #from remaining data, extract data for 7/1-8/31
+  select(dateTime, site, parameter, parameterValue, year)%>% #drop extra columns
+  pivot_wider(id_cols = c(dateTime, site, year), names_from = parameter, values_from = parameterValue)%>% #pivot wider to get cols for discharge and water temp
+  rename(dischargeCfs = 4, waterTemp = 5)%>% #renaming
+  group_by(site, year)%>% # group by site/year/parameter
+  mutate(qMissing = length(which(is.na(dischargeCfs))),
+         tMissing = length(which(is.na(waterTemp))),
+         nObs = n())%>%
+  mutate(qPercMissing = (qMissing/nObs)*100, 
+         tPercMissing = (tMissing/nObs)*100)%>% # calculate number missing obs and percent missing obs for each parameter/year
+  filter(!tPercMissing>5) #drop years with >5% missing temp data
+
+```
+
+#### b. Average summer temperature analysis
+
+Calculate average summer temp:
+
+```{r}
+summerTemps <- valleyTemps %>%
+  mutate(date = ymd(substr(dateTime, 1, 10)))%>%
+  group_by(site, year, date)%>%
+  mutate(dailyMax = max(waterTemp, na.rm = T))%>%
+  ungroup()%>%
+  group_by(site, year)%>%
+  summarise(meanTemp = mean(waterTemp, na.rm = T), 
+            maxXbar =mean(dailyMax, na.rm = T))%>%
+  pivot_longer(!c(site, year), names_to = "metric", values_to = "metricValue")%>%
+  filter(!metricValue == -Inf)%>%
+  mutate(metricPrint = ifelse(metric == "meanTemp", 
+                              "Mean July-Aug Stream Temp., C", 
+                              "Mean daily max July-Aug Stream Temp., C"))%>%
+  mutate(siteMetric = paste(site, metricPrint, sep = " "))
+```
+
+Run analysis: 
+
+Nest data:
+
+
+```{r}
+tempNest <- summerTemps %>%
+  nest(data = -c(siteMetric)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+tempModels <- tempNest %>%
+  mutate(model = map(data, ~lm(metricValue~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+tempModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+tempPV <- merge(summerTemps, 
+                     select(tempModels, siteMetric, p.value) #add p-values
+                     )
+
+tPVs <- tempPV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2)) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+temp.plot <- ggplot(tempPV, aes(x = year, y = metricValue, color = factor(metricPrint)))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Metric Value", color = "Legend")+
+  scale_color_manual(values = c("orange","darkred"))+
+  geom_text(data = tPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+temp.plot
+
+#Save plot:
+ggsave("Valley_summerTemps.jpg", temp.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 6, width = 10)
+```
+
+#### c. Discharge vs. Water Temperature
+
+Data prep - get rid of years with >5% discharge OR water temperature, nest by site
+
+```{r}
+summerQTNest <- valleyTemps%>%
+  filter(!qPercMissing>5)%>% #drop years with >5% missing discharge data
+  nest(data = -c(site))
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+tempqModels <- summerQTNest %>%
+  mutate(model = map(data, ~lm(waterTemp~dischargeCfs, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "dischargeCfs")  #remove intercept term to just get info on year for each site
+tempqModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+tempqPV <- merge(unnest(summerQTNest, cols = c(data)), 
+                     select(tempqModels, site, p.value) #add p-values
+                     )
+
+tqPVs <- tempqPV%>%
+  group_by(site)%>%
+  summarize(x = mean(dischargeCfs, na.rm = T), label = round(unique(p.value), 2)) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+temp.q.plot <- ggplot(tempqPV, aes(x = dischargeCfs, y = waterTemp, color = site))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Discharge, cfs", y = "Water temperature, C")+
+  scale_color_manual(values = c("cyan3","cyan4", "lightblue"))+
+  geom_text(data = tqPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+temp.q.plot
+
+#Save plot:
+ggsave("Valley_dischargeTemps.jpg", temp.q.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 6, width = 10)
+```
