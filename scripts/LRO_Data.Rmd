@@ -2800,7 +2800,7 @@ valleyTemps <- valleySites %>%
          nObs = n())%>%
   mutate(qPercMissing = (qMissing/nObs)*100, 
          tPercMissing = (tMissing/nObs)*100)%>% # calculate number missing obs and percent missing obs for each parameter/year
-  filter(!tPercMissing>5) #drop years with >5% missing temp data
+  filter(!tPercMissing>3) #drop years with >3% missing temp data
 
 ```
 
@@ -2886,7 +2886,7 @@ Data prep - get rid of years with >5% discharge OR water temperature, nest by si
 
 ```{r}
 summerQTNest <- valleyTemps%>%
-  filter(!qPercMissing>5)%>% #drop years with >5% missing discharge data
+  filter(!qPercMissing>3)%>% #drop years with >5% missing discharge data
   nest(data = -c(site))
 ```
 
