@@ -435,8 +435,6 @@ fullData_flagged <- merge(dataGaps,fullData_complete)
 ```
 
 
-## ERROR on 5/26 - apparently exceeding memory?? Waiting on adding Tony Grove and Guinavah for now. 
-
 #### vi. Alternative formatting for DOY plotting:
 
 Alternative data format for DOY plots: 
@@ -537,7 +535,7 @@ Basic Time Series:
 #Initial plot:
 stream.temp <- ggplot(
   filter(fullData,
-         parameter == "Surface Water Temperature"), 
+         parameter == "Water Temperature"), 
   aes(x = dateTime, y = parameterValue, color = site)
 )+
   geom_line()+
@@ -877,7 +875,7 @@ stream.plot <- ggplot(streamStations, aes(x = year, y = annualTot))+
   theme_classic()+
   labs(x = "Year", y = "Total annual value")+
   geom_text(data = filter(pVals, !str_detect(siteParam, "Climate")), aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
-  facet_wrap(~siteParam, scales = "free", nrow = 3, ncol = 2)+
+  facet_wrap(~siteParam, scales = "free")+
   theme(axis.text = element_text(size = 11), 
         axis.title = element_text(size = 11, face = "bold"), 
         strip.text = element_text(size = 10, face = "bold"))
@@ -888,7 +886,6 @@ stream.plot
 #Save plot:
 ggsave("Annual_Stream_Totals.jpg", stream.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 11, width = 12)
 ```
-
 
 ### B. Individual Variable Analyses:
 
@@ -992,7 +989,7 @@ First, extract data and calculate annual average stream temperature, # days with
 
 ```{r}
 streamTemp <- dailyData%>%
-  filter(parameter == "Surface Water Temperature")%>% #extract discharge data from prev. calculated annual min, mean, max, etc. 
+  filter(parameter == "Water Temperature")%>% #extract discharge data from prev. calculated annual min, mean, max, etc. 
   mutate(month = month(date),
          year = year(date), 
          summerT = ifelse(month == 7|month ==8, paramDaily, NA), 
@@ -1417,7 +1414,7 @@ fb.plot <- ggplot(stQFbPV, aes(x = loganAtFbCFS, y = maxSWE, color = snotelSite)
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Logan River at Franklin Basin - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
-  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "lightblue"))+
+  scale_color_manual(values = brewer.pal(length(unique(stQFbPV$snotelSite)), "PRGn"))+
   geom_text(data = fbPVs, aes(x = x, label = paste("P=", p.label, ", ", "R2=", r.label)), y = Inf, vjust = 2)+
   facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
@@ -1464,7 +1461,7 @@ main.plot <- ggplot(stQMainPV, aes(x = loganAtMainCFS, y = maxSWE, color = snote
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Logan River at Main St. - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
-  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "lightblue"))+
+  scale_color_manual(values = brewer.pal(length(unique(stQFbPV$snotelSite)), "PRGn"))+
   geom_text(data = mainPVs, aes(x = x, label = paste("P=", p.label, ", ", "R2=", r.label)), y = Inf, vjust = 2)+
   facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
@@ -1512,7 +1509,7 @@ mendon.plot <- ggplot(stQFbPV, aes(x = loganAtMendonCFS, y = maxSWE, color = sno
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Logan River at Mendon - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
-  scale_color_manual(values = c("cyan4", "darkblue", "darkgreen", "lightblue"))+
+  scale_color_manual(values = brewer.pal(length(unique(stQFbPV$snotelSite)), "PRGn"))+
   geom_text(data = mendonPVs, aes(x = x, label = paste("P=", p.label, ", ", "R2=", r.label)), y = Inf, vjust = 2)+
   facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
@@ -1630,7 +1627,7 @@ meanSwe.plot <- ggplot(lroStPlot, aes(x = totalAnnualQ, y = maxSWEXbar, color = 
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Total Annual Discharge, CFS", y = "Mean Peak Snow Water Equivalent, cm", color = "Snotel Site")+
-  scale_color_manual(values = c("cyan2", "cyan3", "cyan4"))+
+  scale_color_manual(values = brewer.pal(length(unique(lroStPlot$lroSite)), "PRGn"))+
   geom_text(data = lroStPV, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
   facet_wrap(~lroSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
