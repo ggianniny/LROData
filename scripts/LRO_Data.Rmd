@@ -2310,7 +2310,7 @@ ggsave("RainSnow_WinterMetrics.jpg", rsw.plot, device = "jpeg", path = here("out
 
 ### C. Canyon Sites - Discharge Metrics
 
-Canyon sites are: Logan River at Franklin Basin, Wood Camp Spring, Rick's Spring, and Logan River at First Dam 
+Canyon sites are: Logan River at Franklin Basin, Wood Camp Spring, Rick's Spring, Logan River at Tony Grove RS, Logan River at Guinavah, and Logan River at First Dam 
 
 Key metrics for canyon sites are: 
 
@@ -2325,7 +2325,7 @@ Extract canyon discharge data, prep for initial checks/plots:
 
 ```{r}
 canyonSites <- fullData_usgs%>%
-  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River")%>% #extract canyon sites
+  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove")%>% #extract canyon sites
   filter(parameter == "Discharge_cfs")%>% #extract discharge data
   select(!c(parameter, unit))%>% #drop extra cols
   rename(discharge_cfs = parameterValue)%>% #renaming cols
@@ -2658,7 +2658,7 @@ runoff.plot <- ggplot(runoffPV, aes(x = year, y = runoffVol, color = site))+
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Year", y = "Total runoff volume, cubic feet")+
-  scale_color_manual(values = c("cyan3","cyan4", "lightblue", "darkblue"))+
+  scale_color_manual(values = brewer.pal(length(runoffPV$site), "PRGn"))+
   geom_text(data = rfPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
   facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
