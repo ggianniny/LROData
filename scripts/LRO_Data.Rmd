@@ -2672,6 +2672,132 @@ runoff.plot
 ggsave("Runoff_metrics.jpg", runoff.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
 ```
 
+#### iii. Summer stream temperature
+
+Data prep:
+
+```{r}
+canyonTemps <- fullData_usgs%>%
+  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove")%>% #extract canyon sites
+  filter(parameter == "Water Temperature")%>% #extract temperature data
+  select(!c(parameter, unit))%>% #drop extra cols
+  rename(waterTemp = parameterValue)%>% #renaming cols
+  mutate(year = year(dateTime), 
+         month = month(dateTime), 
+         doy = yday(dateTime), 
+         date = ymd(substr(dateTime, 1, 10)))%>% #extract year, month, and date
+  mutate(waterYear=ifelse(month<10, year, year+1))%>% #add water year column
+  group_by(site,year)%>% 
+  mutate(doyMin = min(doy), 
+         doyMax = max(doy))%>% #calculate min and max DOY for each site/year
+  mutate(waterDOY = ifelse(doy>=doyMax-91, 
+                           doy-(doyMax-92), 
+                           doy+92)
+         )%>% #use min/max Doy to calculate water day of year
+  ungroup()%>%
+  filter(month==7|month==8) #extract July and August
+```
+
+Drop years with >5% missing data: 
+
+```{r}
+canyonTempsClean <- canyonTemps%>%
+  group_by(site, year)%>% #group by site and year
+  mutate(nMissing = length(which(is.na(waterTemp))), 
+         nTot = n())%>% #calculate # missing obs, total # obs
+  mutate(percMissing = (nMissing/nTot)*100)%>% #calculate % missing obs
+  ungroup()%>%
+  filter(!percMissing>5) #drop years with >5% data missing. 
+```
+
+Calculate metrics of interest; rearrange for plotting:
+
+For BCT Temps: using 17 C based on this reference: https://ndep.nv.gov/uploads/water-wqs-docs/BonnevilleLCTTTA.pdf
+
+```{r}
+canyonTempMetrics <- canyonTempsClean %>%
+  group_by(site, year, doy)%>%
+  mutate(dailyMax = max(waterTemp, na.rm = T), 
+         dailyMean = mean(waterTemp, na.rm = T))%>%
+  ungroup()%>%
+  mutate(dailyMax = ifelse(is.infinite(dailyMax), NA, dailyMax), 
+         dailyMean = ifelse(is.infinite(dailyMean), NA, dailyMean))%>%
+  group_by(site, year)%>%
+  summarise(
+    meanTemp = mean(waterTemp, na.rm = T), 
+    meanMax = mean(dailyMax, na.rm = T), 
+    medTemp = median(waterTemp, na.rm = T)
+    )%>%
+  pivot_longer(!c(site, year), names_to = "metric", values_to = "metricValue")%>%
+  mutate(siteMetric = paste(site, metric, sep = " - "))%>%
+  mutate(metricPrint = case_when(
+    metric == "meanTemp" ~ "Mean July-August Stream Temp., C", 
+    metric == "meanMax" ~ "Mean daily maximum July-August Stream Temp, C", 
+    metric == "medTemp" ~ "Median July-August Stream Temp., C"
+  ))
+```
+
+Run analysis: 
+
+Nest data:
+
+
+```{r}
+CanyonTempNest <- canyonTempMetrics %>%
+  nest(data = -c(siteMetric)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+CanyonTempModels <- CanyonTempNest %>%
+  mutate(model = map(data, ~lm(metricValue~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+CanyonTempModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+CanyonTempPV <- merge(canyonTempMetrics, 
+                     select(CanyonTempModels, siteMetric, p.value) #add p-values
+                     )%>%
+  group_by(site, metric)%>%
+  mutate(meanYear = mean(year))%>%
+  ungroup()
+
+ctPVs <- CanyonTempPV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2), y = quantile(metricValue, 0.1)) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+canyon.temp.plot <- ggplot(CanyonTempPV, aes(x = year, y = metricValue, color = factor(metricPrint)))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Metric Value", color = "Legend")+
+  scale_color_manual(values = c("orange","darkorange", "darkred"))+
+  geom_hline(aes(yintercept = 17), color = "darkgrey", linetype = "dashed")+
+  geom_text(data = ctPVs, aes(x = x, y = y,label = paste("P=", label)), vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  geom_text(aes(x = meanYear, y = 17.1, label = "BCT Chronic Temp. Threshold"), color = "darkgrey", size = 2.5 )+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+canyon.temp.plot
+
+#Save plot:
+ggsave("Canyon_summerTemps.jpg", canyon.temp.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+
 ### D. Valley Sites - Discharge + Temperature Metrics
 
 Valley sites currently included are: 
@@ -3033,11 +3159,12 @@ Data Prep:
 ```{r}
 diversionMerge <- diversion %>%
   ungroup()%>%
-  filter(sites == "main_mendon")%>% #extract data for main vs. Mendon
+  filter(sites == "waterLab_mendon")%>% #extract data for main vs. Mendon
   select(waterYear, totQDiff) #drop extra cols
 
 dischargeDiversion <- merge(valleyDischarge, diversionMerge)%>% #merge with discharge data
-  arrange(site, waterYear)
+  arrange(site, waterYear)%>%
+  filter(site == "Logan River at the Utah Water Research Laboratory west bridge")
 ```
 
 Run models: 
@@ -3079,11 +3206,11 @@ diversion.q.plot <- ggplot(diversionQPV, aes(x = totDischarge, y = totQDiff, col
   geom_point()+
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
-  labs(x = "Total water year discharge, cubic feet", y = "Total amount diverted between Main St. and Mendon, cubic feet")+
+  labs(x = "Total water year discharge at Water Lab, cubic feet", y = "Difference in irrigation season discharge, Water Lab to Mendon, cubic feet")+
   scale_color_manual(values = c("cyan3","cyan4", "lightblue"))+
   geom_text(data = divQPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
   geom_text(data = divQPVs, aes(x = x, y = yRep, label = paste("Incl. ", repLabel, "% regressed data", sep = "")), vjust = 2)+
-  facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
+  #facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
         axis.title = element_text(size = 11, face = "bold"), 
         strip.text = element_text(size = 10, face = "bold"), 
@@ -3095,6 +3222,69 @@ diversion.q.plot
 ggsave("Valley_diversion_discharge.jpg", diversion.q.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 6, width = 10)
 ```
 
+##### d. Diversion volume as % of annual volume
+
+Data Prep: 
+
+```{r}
+dischargeDiversionProp <- dischargeDiversion%>%
+  mutate(diversionProp = (totQDiff/totDischarge)*100)
+```
+
+Run models: 
+
+Nest data:
+
+```{r}
+diversionPropNest <- dischargeDiversionProp%>%
+  nest(data = -c(site)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+diversionPropModels <- diversionPropNest %>%
+  mutate(model = map(data, ~lm(diversionProp~totDischarge, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "totDischarge")  #remove intercept term to just get info on year for each site
+diversionPropModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+diversionPropPV <- dischargeDiversionProp%>%
+  merge(select(diversionPropModels, site, p.value) #add p-values
+                     )
+
+divPropPVs <- diversionPropPV%>%
+  group_by(site)%>%
+  summarize(x = mean(totDischarge), label = round(unique(p.value), 2), repLabel = round(unique(totPercReplaced), 2), yRep = quantile(diversionProp, 0.05)) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+diversion.prop.plot <- ggplot(diversionPropPV, aes(x = totDischarge, y = diversionProp, color = site))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Total water year discharge at Water Lab, cubic feet", y = "% difference in discharge, Water Lab to Mendon, cubic feet")+
+  scale_color_manual(values = c("cyan3","cyan4", "lightblue"))+
+  geom_text(data = divPropPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
+  geom_text(data = divPropPVs, aes(x = x, y = yRep, label = paste("Incl. ", repLabel, "% regressed data", sep = "")), vjust = 2)+
+  #facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "none")
+
+diversion.prop.plot
+
+#Save plot:
+ggsave("Valley_diversion_proportion.jpg", diversion.prop.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 6, width = 10)
+```
 
 ### ii. Water Temperature Metrics
 
