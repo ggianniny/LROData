@@ -2237,7 +2237,7 @@ rainSnowWinter <- rainSnow%>%
   mutate(year = year(date),
          month = month(date))%>% #extract date and year 
   mutate(waterYear = ifelse(month<10, year, year+1))%>% #calculate water year
-  filter(month>10|month<4)%>% #extract data for November-May
+  filter(month>11|month<4)%>% #extract data for November-May
   group_by(site_name, waterYear)%>%
   summarise(
     totSnow = sum(dailySnow, na.rm = T), 
@@ -2272,9 +2272,9 @@ rainSnowWPV <- merge(rainSnowWinter,
                      select(rswModels, site_name, metricName, p.value) #add p-values
                      )%>%
   mutate(metricPrint = case_when(
-    metricName == "totSnow" ~ "Total Nov-Mar snowfall, mm", 
-    metricName == "totRain" ~"Total Nov-Mar rainfall, mm", 
-    metricName == "rainSnowRatio" ~"Nov-Mar rain:snow ratio" #add print-friendly metric name for plotting
+    metricName == "totSnow" ~ "Total Dec-Mar snowfall, mm", 
+    metricName == "totRain" ~"Total Dec-Mar rainfall, mm", 
+    metricName == "rainSnowRatio" ~"Dec-Mar rain:snow ratio" #add print-friendly metric name for plotting
   ))%>%
   mutate(siteMetric = paste(site_name, metricPrint, sep = " - ")) #add metric + site column for plotting
 
@@ -2961,7 +2961,9 @@ regFinal <- regressed%>%
   mutate(totReplaced = totMissing-totMissingReg)%>%
   mutate(totPercReplaced = (totReplaced/n())*100)%>%
   ungroup()%>%
-  mutate(isRegressed = ifelse(parameterValue==paramValueReg, FALSE, TRUE))
+  mutate(isRegressed = ifelse(is.na(parameterValue)==T&is.na(paramValueReg)==F, "Y", "N"))
+
+unique(regFinal$isRegressed)
 
 #re-check data availability:
 regDataAv <- regFinal%>%
@@ -2969,6 +2971,19 @@ regDataAv <- regFinal%>%
   summarise(missing = unique(nMissingReg), percMis = unique(percMissingReg), replaced = unique(nReplaced), percReplaced = unique(percReplaced))
 
 View(regDataAv)
+```
+
+
+Visualization of regressed data:
+
+```{r}
+reg.plot <- ggplot(filter(
+  regFinal, site == "Logan River at Main Street (Highway 89/91) Bridge"&parameter == "Discharge_cfs"&year==2022&month>6
+), aes(x = dateTime, y = paramValueReg, color = isRegressed))+
+  geom_point(size = 0.5)+
+  scale_color_manual(values =c("black", "red"))+
+  theme_classic()
+reg.plot
 ```
 
 ######2. Re-check data availability and prep for analysis. 
@@ -3222,7 +3237,7 @@ diversion.q.plot
 ggsave("Valley_diversion_discharge.jpg", diversion.q.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 6, width = 10)
 ```
 
-##### d. Diversion volume as % of annual volume
+##### d. Diversion volume as % of annual volume - Change over time
 
 Data Prep: 
 
@@ -3244,10 +3259,10 @@ Run basic models for each site and metric of interest:
 
 ```{r}
 diversionPropModels <- diversionPropNest %>%
-  mutate(model = map(data, ~lm(diversionProp~totDischarge, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+  mutate(model = map(data, ~lm(diversionProp~waterYear, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
                      tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
   unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
-  filter(term == "totDischarge")  #remove intercept term to just get info on year for each site
+  filter(term == "waterYear")  #remove intercept term to just get info on year for each site
 diversionPropModels
 ```
 
@@ -3260,17 +3275,17 @@ diversionPropPV <- dischargeDiversionProp%>%
 
 divPropPVs <- diversionPropPV%>%
   group_by(site)%>%
-  summarize(x = mean(totDischarge), label = round(unique(p.value), 2), repLabel = round(unique(totPercReplaced), 2), yRep = quantile(diversionProp, 0.05)) #create separate dataframe with p-values for adding to plots
+  summarize(x = mean(waterYear), label = round(unique(p.value), 2), repLabel = round(unique(totPercReplaced), 2), yRep = quantile(diversionProp, 0.05)) #create separate dataframe with p-values for adding to plots
 ```
 
 Plotting:
 
 ```{r}
-diversion.prop.plot <- ggplot(diversionPropPV, aes(x = totDischarge, y = diversionProp, color = site))+
+diversion.prop.plot <- ggplot(diversionPropPV, aes(x = waterYear, y = diversionProp, color = site))+
   geom_point()+
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
-  labs(x = "Total water year discharge at Water Lab, cubic feet", y = "% difference in discharge, Water Lab to Mendon, cubic feet")+
+  labs(x = "Water Year", y = "% difference in discharge, Water Lab to Mendon, cubic feet")+
   scale_color_manual(values = c("cyan3","cyan4", "lightblue"))+
   geom_text(data = divPropPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
   geom_text(data = divPropPVs, aes(x = x, y = yRep, label = paste("Incl. ", repLabel, "% regressed data", sep = "")), vjust = 2)+
