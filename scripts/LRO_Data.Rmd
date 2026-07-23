@@ -130,7 +130,7 @@ View(nameRef)
 Enter desired site numbers below: 
 
 ```{r}
-soi <- c(7,8,15,18, 19,20,21, 22, 23,24,26) #ENTER DESIRED SITE NUMBERS HERE inside the parentheses. e.g. if you want sites 1, 3, and 19, the code should read "soi <- c(1, 3, 19)"
+soi <- c(7,8,15,18, 19,20,21, 22, 23,24,26, 27, 34) #ENTER DESIRED SITE NUMBERS HERE inside the parentheses. e.g. if you want sites 1, 3, and 19, the code should read "soi <- c(1, 3, 19)"
 
 #check correct sites selected:
 nameRef[soi,]
@@ -2310,7 +2310,7 @@ ggsave("RainSnow_WinterMetrics.jpg", rsw.plot, device = "jpeg", path = here("out
 
 ### C. Canyon Sites - Discharge Metrics
 
-Canyon sites are: Logan River at Franklin Basin, Wood Camp Spring, Rick's Spring, Logan River at Tony Grove RS, Logan River at Guinavah, and Logan River at First Dam 
+Canyon sites are: Logan River at Franklin Basin, Wood Camp Spring, Rick's Spring, Logan River at Tony Grove RS, Logan River at Guinavah,  Logan River at First Dam, right hand fork, and temple fork. 
 
 Key metrics for canyon sites are: 
 
@@ -2325,7 +2325,7 @@ Extract canyon discharge data, prep for initial checks/plots:
 
 ```{r}
 canyonSites <- fullData_usgs%>%
-  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove")%>% #extract canyon sites
+  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove"|site == "Temple Fork above confluence with Logan River"|site == "Right Hand Fork above confluence with Logan River")%>% #extract canyon sites
   filter(parameter == "Discharge_cfs")%>% #extract discharge data
   select(!c(parameter, unit))%>% #drop extra cols
   rename(discharge_cfs = parameterValue)%>% #renaming cols
@@ -2695,7 +2695,7 @@ canyonTemps <- fullData_usgs%>%
                            doy+92)
          )%>% #use min/max Doy to calculate water day of year
   ungroup()%>%
-  filter(month==7|month==8) #extract July and August
+  filter(month==8) #extract August
 ```
 
 Drop years with >5% missing data: 
@@ -2731,9 +2731,9 @@ canyonTempMetrics <- canyonTempsClean %>%
   pivot_longer(!c(site, year), names_to = "metric", values_to = "metricValue")%>%
   mutate(siteMetric = paste(site, metric, sep = " - "))%>%
   mutate(metricPrint = case_when(
-    metric == "meanTemp" ~ "Mean July-August Stream Temp., C", 
-    metric == "meanMax" ~ "Mean daily maximum July-August Stream Temp, C", 
-    metric == "medTemp" ~ "Median July-August Stream Temp., C"
+    metric == "meanTemp" ~ "Mean August Stream Temp., C", 
+    metric == "meanMax" ~ "Mean daily maximum August Stream Temp, C", 
+    metric == "medTemp" ~ "Median August Stream Temp., C"
   ))
 ```
 
@@ -2770,7 +2770,7 @@ CanyonTempPV <- merge(canyonTempMetrics,
 
 ctPVs <- CanyonTempPV%>%
   group_by(siteMetric, metricPrint)%>%
-  summarize(x = mean(year), label = round(unique(p.value), 2), y = quantile(metricValue, 0.1)) #create separate dataframe with p-values for adding to plots
+  summarize(x = mean(year), label = round(unique(p.value), 2), y = Inf) #create separate dataframe with p-values for adding to plots
 ```
 
 Plotting:
@@ -2781,11 +2781,11 @@ canyon.temp.plot <- ggplot(CanyonTempPV, aes(x = year, y = metricValue, color = 
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Year", y = "Metric Value", color = "Legend")+
-  scale_color_manual(values = c("orange","darkorange", "darkred"))+
-  geom_hline(aes(yintercept = 17), color = "darkgrey", linetype = "dashed")+
+  scale_color_manual(values = c("orange", "darkred", "darkorange"))+
+  #geom_hline(aes(yintercept = 17), color = "darkgrey", linetype = "dashed")+
   geom_text(data = ctPVs, aes(x = x, y = y,label = paste("P=", label)), vjust = 2)+
   facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
-  geom_text(aes(x = meanYear, y = 17.1, label = "BCT Chronic Temp. Threshold"), color = "darkgrey", size = 2.5 )+
+  #geom_text(aes(x = meanYear, y = 17.1, label = "BCT Chronic Temp. Threshold"), color = "darkgrey", size = 2.5 )+
   theme(axis.text = element_text(size = 11), 
         axis.title = element_text(size = 11, face = "bold"), 
         strip.text = element_text(size = 10, face = "bold"), 
@@ -2894,9 +2894,13 @@ naGroups <- naLengths %>%
   group_by(naGrp)%>% #group by NA Group
   mutate(minObs = ifelse(isNa == F, min(obsNum), min(obsNum-1)), 
          maxObs = ifelse(isNa == F, max(obsNum), max(obsNum+1)))%>% #extract minimum and maximum observation # for each group, add/subtract one for groups with NA's to get measurements on either end. 
+  mutate(minObs20 = ifelse(naGrp == min(naGrp), minObs, minObs-20), 
+         maxObs20 = ifelse(naGrp == max(naGrp), maxObs, maxObs+20))%>%
   ungroup()%>%
+  #mutate(start = mean(c(parameterValue[minObs20:minObs]), na.rm = T), # Calculate mean value for 20 obs before gap
+       #  end = mean(c(parameterValue[maxObs:maxObs20]), na.rm = T))%>% #Calculate mean value for 20 obs after gap
   mutate(start = parameterValue[minObs], 
-         end = parameterValue[maxObs])%>% #extract observed value for min and max observation # for each group
+         end = parameterValue[maxObs])%>%
   select(site, isNa, naGrp, minObs, maxObs, start, end)%>% #drop extra columns
   distinct()%>% #drop duplicate rows
   pivot_longer(!c(site, isNa, naGrp, start, end), names_to = "type", values_to = "obsNum")%>%
@@ -2986,20 +2990,413 @@ reg.plot <- ggplot(filter(
 reg.plot
 ```
 
+#######1A. Alternative regression method
+
+Goal = regress over more points to improve accuracy. For now - trying to regress over 20 points before and after gap. 
+
+General workflow: 
+
+  - Write function to iterate the following steps over each site: 
+    + Calculate lengths of each sequence of NA and non-NA values
+    + Extract the 20 observations before and after each gap
+    + Regress over these 40 observations
+    + Predict values for all NA values 
+    + Add these predicted values back into dataframe
+  - Apply function to valleySites data
+  - Calculate % data regressed in each site
+
+Write function to carry out steps above:
+
+```{r}
+##########################################################################
+# fill_gaps_weighted()
+#
+# Fills gaps in observationValue using weighted linear regression
+# (inverse squared distance weighting) separately for each site.
+#
+# Inputs:
+#   df                 = data frame
+#   siteColumn         = name of site/group column
+#   observationColumn  = name of observation number column
+#   valueColumn        = name of value column
+#   n                  = number of non-missing observations to use
+#                        before and after each gap (default = 20)
+#
+# Returns:
+#   filledData         = original data with gaps filled
+#   regressions        = regression information for each gap
+#   skippedGaps        = gaps that could not be filled
+##########################################################################
+
+fill_gaps_weighted <- function(
+    df,
+    siteColumn = "Site",
+    observationColumn = "observationNumber",
+    valueColumn = "observationValue",
+    n = 20 #defining input variables
+){
+
+  ############################################################
+  # Make a copy of the original data
+  ############################################################
+
+  filled_df <- df
+
+  ############################################################
+  # Create empty tables for output
+  ############################################################
+
+  regression_summary <- data.frame()
+
+  skipped_gaps <- data.frame()
+
+  ############################################################
+  # Process each site independently
+  ############################################################
+
+  for(site in unique(df[[siteColumn]])){
+
+    ##########################################################
+    # Extract one site's data
+    ##########################################################
+
+    site_rows <- which(df[[siteColumn]] == site) 
+
+    site_df <- df[site_rows, ]
+
+    ##########################################################
+    # Sort observations by observation number
+    ##########################################################
+
+    site_df <- site_df[order(site_df[[observationColumn]]), ]
+
+    ##########################################################
+    # Identify runs of missing values
+    ##########################################################
+
+    na <- is.na(site_df[[valueColumn]]) #vector with TRUE for all NA values, FALSE for all non-NA values
+
+    r <- rle(na) #calculate length of each sequence in vector created above
+
+    ends <- cumsum(r$lengths) #extract row numbers for end of each sequence
+
+    starts <- ends - r$lengths + 1 #extract row numbers for beginning of each sequence
+
+    gap_starts <- starts[r$values] #Extract row # for start of each group of NA's
+
+    gap_ends <- ends[r$values] #extract row # for end of each group of NA's
+
+    ##########################################################
+    # Process each gap
+    ##########################################################
+
+    for(i in seq_along(gap_starts)){
+
+      gs <- gap_starts[i]
+      ge <- gap_ends[i] #Extract start and end row # for "ith" gap
+
+      ########################################################
+      # Find the last n non-missing observations before gap
+      ########################################################
+
+      before_idx <- which(
+        !is.na(site_df[[valueColumn]][1:(gs-1)]) #extract all non NA values before gap
+      )
+
+      before_idx <- tail(before_idx, n) #then extract last 20 values
+
+      ########################################################
+      # Find the first n non-missing observations after gap
+      ########################################################
+
+      after_idx <- which(
+        !is.na(site_df[[valueColumn]][(ge+1):nrow(site_df)]) #extract all non-NA values after gap
+      )
+
+      if(length(after_idx) > 0)
+        after_idx <- head(after_idx, n) + ge #if there are non-NA values after the gap, extract the first 20. 
+
+      ########################################################
+      # Skip if there are not enough observations
+      ########################################################
+
+      if(length(before_idx) < n ||
+         length(after_idx) < n){ #if there are <20 non-NA values before or after gap, skip 
+
+        skipped_gaps <- rbind(
+          skipped_gaps,
+          data.frame(
+            Site = site,
+            gapStart = gs,
+            gapEnd = ge,
+            observationsBefore = length(before_idx),
+            observationsAfter = length(after_idx)
+          ) #and print gap info in skipped_gaps table
+        )
+
+        next
+
+      }
+
+      ########################################################
+      # Build regression data
+      ########################################################
+
+      fit_idx <- c(before_idx, after_idx) #vector w. row numbers for 20 obs before and after gap
+
+      fit_data <- data.frame( 
+
+        x = site_df[[observationColumn]][fit_idx],
+
+        y = site_df[[valueColumn]][fit_idx] #extract observation values and numbers for 20 obs before and after gap
+
+      )
+
+      ########################################################
+      # Calculate distance from each observation to the gap
+      ########################################################
+
+      distance <- ifelse(
+
+        fit_idx < gs,
+
+        gs - fit_idx,
+
+        fit_idx - ge
+
+      ) #calculate distance from gap for each obs - obs adjacent to gap is distance 1, next obs is distance 2, etc. 
+
+      ########################################################
+      # Inverse squared distance weights
+      ########################################################
+
+      weights <- 1 / distance^2 #calculate weight = 1 / distance squared (closest values get highest weight)
+
+      ########################################################
+      # Fit weighted linear regression
+      ########################################################
+
+      fit <- lm(
+
+        y ~ x,
+
+        data = fit_data,
+
+        weights = weights
+
+      ) #fit model using weights
+
+      ########################################################
+      # Predict missing values
+      ########################################################
+
+      gap_idx <- gs:ge #ID gap row numbers
+
+      predictions <- predict(
+
+        fit,
+
+        newdata = data.frame(
+
+          x = site_df[[observationColumn]][gap_idx]
+
+        ) # then predict values for these row numbers using the coefficients calculated in the LM above
+
+      )
+
+      ########################################################
+      # Replace missing values
+      ########################################################
+
+      site_df[[valueColumn]][gap_idx] <- predictions #replace missing values in site_df with predicted values
+
+      ########################################################
+      # Save regression statistics
+      ########################################################
+
+      regression_summary <- rbind(
+
+        regression_summary,
+
+        data.frame(
+
+          Site = site,
+
+          gapStart = gs,
+
+          gapEnd = ge,
+
+          gapLength = ge - gs + 1,
+
+          nPoints = nrow(fit_data),
+
+          slope = coef(fit)[2],
+
+          intercept = coef(fit)[1],
+
+          rSquared = summary(fit)$r.squared
+
+        )
+
+      )
+
+    } 
+
+    ##########################################################
+    # Put this site's completed data back into the full dataset
+    ##########################################################
+
+    filled_df[site_rows, ] <- site_df
+
+  } 
+
+  ############################################################
+  # Return results
+  ############################################################
+
+  return(
+
+    list(
+
+      filledData = filled_df,
+
+      regressions = regression_summary,
+
+      skippedGaps = skipped_gaps
+
+    )
+
+  )
+
+}
+```
+
+Prep valleySites data to go into function
+
+```{r}
+valleySimple <- valleySites%>%
+  select(site, parameter, dateTime, parameterValue)%>% #drop extra cols
+  mutate(siteParam = paste(site, parameter, sep = " - "))%>% #add SiteParameter column for grouping
+  group_by(siteParam)%>%
+  mutate(obsNum = row_number()) #add observation # for each site/parameter group
+```
+
+```{r}
+regOutput <- fill_gaps_weighted(valleySimple, 
+                   siteColumn = "siteParam", 
+                   observationColumn = "obsNum", 
+                   valueColumn = "parameterValue",
+                   n = 20)
+
+regOutput$regressions
+```
+
+Identify regressed values, draw plots to check accuracy. 
+
+```{r}
+valleyReg <- regOutput$filledData%>% #extract filled dataframe from function output
+  rename(paramReg = parameterValue)%>% #renaming column with regressed data
+  merge(valleySimple)%>% #add back to original data
+  mutate(isReg = ifelse(is.na(parameterValue)==T&is.na(paramReg)==F, "Y", "N"))%>%
+  mutate(year = year(dateTime), 
+         month = month(dateTime))%>%
+  group_by(siteParam)%>%
+  mutate(isNa = is.na(parameterValue))%>% #add column with T/F for NAs
+  mutate(naGrp = consecutive_id(isNa))%>% #add consecutive ID's for each group of NA's or non-NA's within each site/parameter
+  ungroup()
+
+valleyReg[2950:2960,]
+
+naGrps <- valleyReg %>%
+  filter(isNa == T)%>%
+  select(siteParam, naGrp)%>%
+  distinct()
+
+naGrps
+```
+
+Visualization of regressed data:
+
+```{r}
+reg.plot2 <- ggplot(filter(
+  valleyReg, site == "Logan River at Main Street (Highway 89/91) Bridge"&parameter == "Discharge_cfs"&year==2022&month>6
+), aes(x = dateTime, y = paramReg, color = isReg))+
+  geom_point(size = 0.5)+
+  scale_color_manual(values =c("black", "red"))+
+  theme_classic()
+reg.plot2
+```
+
+Seems to be working well - needs some tuning to:
+
+  - Don't fill gaps if >5 days long
+  - Maybe don't fill gaps with bad R2... <0.2? other thresholds?
+  
+First - need to associate regression info with each gap to decide whether or not to include it. 
+
+```{r}
+regStats <- regOutput$regressions%>%
+  group_by(Site)%>% #group by site
+  mutate(naGrp = 2*row_number())%>% #add NA group for merge
+  ungroup()%>%
+  rename(siteParam = Site)
+regStats
+```
+
+Adding regression summary data to valleyReg dataframe:
+
+```{r}
+valleyRegStat <- merge(valleyReg, regStats, all = T)%>% #merge
+  arrange(siteParam, dateTime) #sort by date time and site parameter
+
+head(valleyRegStat) #Check beginning of data frame
+
+valleyRegStat[2950:2960,] #check 1st data gap
+valleyRegStat[278662:278680,] #check random longer data gap
+```
+
+Apply filters and calculate data availability - Currently not filling gaps with: 
+
+  - >480 missing obs (= to 5 missing days @ 1 obs every 15min)
+  - R2 <0.5
+  
+```{r}
+valleyRegCor <- valleyRegStat %>%
+  mutate(paramReg = ifelse(isNa ==T&(gapLength>480|rSquared<0.5), NA, paramReg))%>% #for NA groups: change paramReg back to NA if gap length >480 OR R2 <0.5
+  mutate(isReg = ifelse(is.na(parameterValue)==T&is.na(paramReg)==F, "Y", "N"))%>% #re-calculate whether point was regressed after filters
+  group_by(siteParam, year)%>%
+  mutate(nObs = n(), 
+         nReg = length(which(isReg == "Y")), 
+         nMissing = length(which(is.na(paramReg))))%>%
+  mutate(percMissing = (nMissing/nObs)*100, 
+         percReg = (nReg/nObs)*100)%>% #calculate # obs, # observations regressed, # missing obs, % missing obs, and % regressed obs for each year. 
+  ungroup()
+  
+
+
+valleyRegCor[2950:2960,] #check 1st data gap
+valleyRegCor[278662:278680,] #check random longer data gap
+```
+
+-----
+-----
+
+#STOPPING HERE ON 7/23 - need to re-code all valley analyses after this point using updated regression data. 
+
 ######2. Re-check data availability and prep for analysis. 
 
 Drop years with >5% missing, calculate discharge metrics:
 
 ```{r}
-valleyDischarge <- regFinal%>%
-  filter(parameter=="Discharge_cfs", !percMissingReg>5)%>% #drop years with >5% missing data after regression
+valleyDischarge <- valleyRegCor%>%
+  filter(parameter=="Discharge_cfs", !percMissing>5)%>% #drop years with >5% missing data after regression
   select(!c(parameter, unit))%>% 
-  rename(dischargeCfs = paramValueReg)%>% #dropping xtra cols, renaming
+  rename(dischargeCfs = paramReg)%>% #dropping xtra cols, renaming
   mutate(dischargeCf = dischargeCfs*15)%>% #calculate total cubic feet going by gauge for each 15sec interval
   group_by(site, waterYear)%>% 
   summarise(totDischarge = sum(dischargeCf, na.rm = T), 
-            nReplaced = unique(nReplaced), 
-            percReplaced = unique(percReplaced), 
+            nReplaced = unique(nReg), 
+            percReplaced = unique(percReg), 
             totPercReplaced = unique(totPercReplaced)) #calculate total water year discharge for each site; include columns for labeling % replaced data for each site/year
 ```
 
@@ -3305,12 +3702,12 @@ ggsave("Valley_diversion_proportion.jpg", diversion.prop.plot, device = "jpeg", 
 
 #### a. Data prep & QA/QC
 
-First, extract years with both discharge and water temperature data avilable for July 1 - August 31; drop years with >5% missing temperature data. 
+First, extract years with both discharge and water temperature data available for August 1 - Sept 30; drop years with >5% missing temperature data. 
 
 ```{r}
 valleyTemps <- regFinal %>%
-  filter(!doyMax<doyMax-122, !doyMin>doyMax-183)%>% #drop years that start after 7/1 or end before 8/31
-  filter(doy>=doyMax-183 & doy<=doyMax-122)%>% #from remaining data, extract data for 7/1-8/31
+  filter(!doyMax<doyMax-92, !doyMin>doyMax-152)%>% #drop years that start after 8/1 or end before 9/30
+  filter(doy>=doyMax-152 & doy<=doyMax-92)%>% #from remaining data, extract data for 7/1-8/31
   select(dateTime, site, parameter, paramValueReg, year)%>% #drop extra columns
   group_by(site, parameter, year)%>%
   pivot_wider(id_cols = c(dateTime, site, year), names_from = parameter, values_from = paramValueReg)%>% #pivot wider to get cols for discharge and water temp
@@ -3323,11 +3720,11 @@ valleyTemps <- regFinal %>%
          tPercMissing = (tMissing/nObs)*100)%>% # calculate number missing obs and percent missing obs for each parameter/year
   filter(!tPercMissing>5) #drop years with >5% missing temp data after regression
 
-#calculate amount of regressed data for July 1 - Aug 31 after dropping years with >5% missing
+#calculate amount of regressed data for Aug 1 - Sept 30 after dropping years with >5% missing
 
 valleyTempReg <- regFinal %>%
-  filter(!doyMax<doyMax-122, !doyMin>doyMax-183)%>% #drop years that start after 7/1 or end before 8/31
-  filter(doy>=doyMax-183 & doy<=doyMax-122)%>% #from remaining data, extract data for 7/1-8/31
+  filter(!doyMax<doyMax-92, !doyMin>doyMax-152)%>% #drop years that start after 7/1 or end before 8/31
+  filter(doy>=doyMax-152 & doy<=doyMax-92)%>% #from remaining data, extract data for 7/1-8/31
   group_by(site, year, parameter)%>%
   mutate(percMissing = (length(which(is.na(paramValueReg)))/n())*100)%>% #calculate # NA's in regressed data during period of interest
   ungroup()%>%
@@ -3356,9 +3753,9 @@ summerTemps <- valleyTemps %>%
             medTemp = median(waterTemp, na.rm = T))%>%
   pivot_longer(!c(site, year), names_to = "metric", values_to = "metricValue")%>%
   filter(!metricValue == -Inf)%>%
-  mutate(metricPrint = case_when(metric == "meanTemp"~ "Mean July-Aug Stream Temp., C", 
-                              metric =="maxXbar"~"Mean daily max July-Aug Stream Temp., C", 
-                              metric == "medTemp" ~"Median July-Aug Stream Temp., C"))%>%
+  mutate(metricPrint = case_when(metric == "meanTemp"~ "Mean Aug-Sep Stream Temp., C", 
+                              metric =="maxXbar"~"Mean daily max Aug-Sep Stream Temp., C", 
+                              metric == "medTemp" ~"Median Aug-Sep Stream Temp., C"))%>%
   mutate(siteMetric = paste(site, metricPrint, sep = " "))%>%
   merge(filter(valleyTempReg, parameter == "Water Temperature"))
 ```
@@ -3404,7 +3801,7 @@ temp.plot <- ggplot(tempPV, aes(x = year, y = metricValue, color = factor(metric
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Year", y = "Metric Value", color = "Legend")+
-  scale_color_manual(values = c("orange","darkorange", "darkred"))+
+  scale_color_manual(values = c("orange", "darkred", "darkorange"))+
   geom_text(data = tPVs, aes(x = x, label = paste("P=", label)), y = Inf, vjust = 2)+
   geom_text(data = tPVs, aes(x = x, y = yRep, label = paste("Incl. ", repLabel, "% regressed data", sep = "")), vjust = 2)+
   facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
