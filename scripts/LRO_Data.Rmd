@@ -3085,6 +3085,7 @@ fill_gaps_weighted <- function(
     gap_starts <- starts[r$values] #Extract row # for start of each group of NA's
 
     gap_ends <- ends[r$values] #extract row # for end of each group of NA's
+    
 
     ##########################################################
     # Process each gap
@@ -3094,6 +3095,8 @@ fill_gaps_weighted <- function(
 
       gs <- gap_starts[i]
       ge <- gap_ends[i] #Extract start and end row # for "ith" gap
+      
+      
 
       ########################################################
       # Find the last n non-missing observations before gap
@@ -3180,9 +3183,9 @@ fill_gaps_weighted <- function(
 
         y ~ x,
 
-        data = fit_data,
+        data = fit_data #,
 
-        weights = weights
+       # weights = weights
 
       ) #fit model using weights
 
@@ -3286,9 +3289,11 @@ regOutput <- fill_gaps_weighted(valleySimple,
                    siteColumn = "siteParam", 
                    observationColumn = "obsNum", 
                    valueColumn = "parameterValue",
-                   n = 20)
+                   n = 20
+                   )
 
 regOutput$regressions
+summary(regOutput$regressions$rSquared)
 ```
 
 Identify regressed values, draw plots to check accuracy. 
@@ -3362,14 +3367,15 @@ Apply filters and calculate data availability - Currently not filling gaps with:
   
 ```{r}
 valleyRegCor <- valleyRegStat %>%
+  mutate(waterYear = ifelse(month<10, year, year+1))%>%
   mutate(paramReg = ifelse(isNa ==T&(gapLength>480|rSquared<0.5), NA, paramReg))%>% #for NA groups: change paramReg back to NA if gap length >480 OR R2 <0.5
   mutate(isReg = ifelse(is.na(parameterValue)==T&is.na(paramReg)==F, "Y", "N"))%>% #re-calculate whether point was regressed after filters
-  group_by(siteParam, year)%>%
+  group_by(siteParam, waterYear)%>%
   mutate(nObs = n(), 
          nReg = length(which(isReg == "Y")), 
          nMissing = length(which(is.na(paramReg))))%>%
   mutate(percMissing = (nMissing/nObs)*100, 
-         percReg = (nReg/nObs)*100)%>% #calculate # obs, # observations regressed, # missing obs, % missing obs, and % regressed obs for each year. 
+         percReg = (nReg/nObs)*100)%>% #calculate # obs, # observations regressed, # missing obs, % missing obs, and % regressed obs for each year.
   ungroup()
   
 
@@ -3381,7 +3387,7 @@ valleyRegCor[278662:278680,] #check random longer data gap
 -----
 -----
 
-#STOPPING HERE ON 7/23 - need to re-code all valley analyses after this point using updated regression data. 
+#STOPPING HERE ON 7/23 - need to re-code all valley analyses after this point using updated regression data. Idea for next time - write a function that will calculate % missing and % regressed for a subset of the data - will be doing this a bunch for lots of different time periods, would be nice to not have to code out every time. 
 
 ######2. Re-check data availability and prep for analysis. 
 
@@ -3390,14 +3396,18 @@ Drop years with >5% missing, calculate discharge metrics:
 ```{r}
 valleyDischarge <- valleyRegCor%>%
   filter(parameter=="Discharge_cfs", !percMissing>5)%>% #drop years with >5% missing data after regression
-  select(!c(parameter, unit))%>% 
+  select(!c(parameter))%>% 
   rename(dischargeCfs = paramReg)%>% #dropping xtra cols, renaming
   mutate(dischargeCf = dischargeCfs*15)%>% #calculate total cubic feet going by gauge for each 15sec interval
+  group_by(site)%>%
+  mutate(totPercReplaced = (sum(nReg)/sum(nObs))*100)%>%
+  ungroup()%>%
   group_by(site, waterYear)%>% 
   summarise(totDischarge = sum(dischargeCf, na.rm = T), 
             nReplaced = unique(nReg), 
             percReplaced = unique(percReg), 
-            totPercReplaced = unique(totPercReplaced)) #calculate total water year discharge for each site; include columns for labeling % replaced data for each site/year
+            totPercReplaced = unique(totPercReplaced)
+            ) #calculate total water year discharge for each site; include columns for labeling % replaced data for each site/year
 ```
 
 ##### b. Total Annual Discharge analysis
@@ -3484,13 +3494,17 @@ diversion <- regFinal%>%
 
 ## Calculate % regressed data included in analysis: 
 
-regSum <- regFinal %>%
+regSum <- valleyRegCor %>%
+  mutate(date = ymd(substr(dateTime, 1, 10)))%>%
+  mutate(doy = yday(date))%>%
+  group_by(site, parameter, year)%>%
+  mutate(doyMax = max(doy), doyMin = min(doy))%>%
   filter(doy>(doyMax-261), doy<(doyMax-91))%>% #extract  data for irrigation season (4/15-9/30) 
   filter(parameter == "Discharge_cfs")%>% #extract discharge data
   group_by(site)%>%
   summarise(
     nMissing = length(which(is.na(parameterValue))), 
-    nMissingReg = length(which(is.na(paramValueReg))), 
+    nMissingReg = length(which(is.na(paramReg))), 
     nTot = n()
   )%>%
   mutate(percReplaced = ((nMissing-nMissingReg)/nTot)*100)%>%
@@ -3705,12 +3719,16 @@ ggsave("Valley_diversion_proportion.jpg", diversion.prop.plot, device = "jpeg", 
 First, extract years with both discharge and water temperature data available for August 1 - Sept 30; drop years with >5% missing temperature data. 
 
 ```{r}
-valleyTemps <- regFinal %>%
+valleyTemps <- valleyRegCor %>%
+  mutate(date = ymd(substr(dateTime, 1, 10)))%>%
+  mutate(doy = yday(date))%>%
+  group_by(site, parameter, year)%>%
+  mutate(doyMax = max(doy), doyMin = min(doy))%>%
   filter(!doyMax<doyMax-92, !doyMin>doyMax-152)%>% #drop years that start after 8/1 or end before 9/30
   filter(doy>=doyMax-152 & doy<=doyMax-92)%>% #from remaining data, extract data for 7/1-8/31
-  select(dateTime, site, parameter, paramValueReg, year)%>% #drop extra columns
+  select(dateTime, site, parameter, paramReg, year)%>% #drop extra columns
   group_by(site, parameter, year)%>%
-  pivot_wider(id_cols = c(dateTime, site, year), names_from = parameter, values_from = paramValueReg)%>% #pivot wider to get cols for discharge and water temp
+  pivot_wider(id_cols = c(dateTime, site, year), names_from = parameter, values_from = paramReg)%>% #pivot wider to get cols for discharge and water temp
   rename(dischargeCfs = 4, waterTemp = 5)%>% #renaming
   group_by(site, year)%>% # group by site/year/parameter
   mutate(qMissing = length(which(is.na(dischargeCfs))),
@@ -3722,15 +3740,19 @@ valleyTemps <- regFinal %>%
 
 #calculate amount of regressed data for Aug 1 - Sept 30 after dropping years with >5% missing
 
-valleyTempReg <- regFinal %>%
+valleyTempReg <- valleyRegCor %>%
+  mutate(date = ymd(substr(dateTime, 1, 10)))%>%
+  mutate(doy = yday(date))%>%
+  group_by(site, parameter, year)%>%
+  mutate(doyMax = max(doy), doyMin = min(doy))%>%
   filter(!doyMax<doyMax-92, !doyMin>doyMax-152)%>% #drop years that start after 7/1 or end before 8/31
   filter(doy>=doyMax-152 & doy<=doyMax-92)%>% #from remaining data, extract data for 7/1-8/31
   group_by(site, year, parameter)%>%
-  mutate(percMissing = (length(which(is.na(paramValueReg)))/n())*100)%>% #calculate # NA's in regressed data during period of interest
+  mutate(percMissing = (length(which(is.na(paramReg)))/n())*100)%>% #calculate # NA's in regressed data during period of interest
   ungroup()%>%
   filter(!percMissing>5)%>%
   group_by(site, parameter)%>%
-  summarise(nReplaced = length(which(is.na(parameterValue)))-length(which(is.na(paramValueReg))), 
+  summarise(nReplaced = length(which(is.na(parameterValue)))-length(which(is.na(paramReg))), 
             nTot = n())%>%
   mutate(percRegressed = (nReplaced/nTot)*100)%>%
   select(site, parameter, percRegressed)
