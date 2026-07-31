@@ -284,7 +284,62 @@ fullData_wc <- rbind(fullData, wcFinal)%>%
   filter(!(site == "Logan River at Wood Camp Bridge"|site=="Logan River Above Wood Camp"))
 ```
 
-#### iv. Adding Logan River @ First Dam and Highline Canal
+#### iv. Filling in missing data for Rick's with 0's
+
+First, identify bounds of when spring is flowing - when are earliest start date, earliest end date? 
+
+```{r}
+ricks <- fullData%>%
+  filter(site == "Ricks Spring above confluence with Logan River")%>% #extract Ricks data
+  mutate(date = ymd(substr(dateTime, 1,10)))%>%
+  mutate(doy = yday(dateTime), 
+         year = year(dateTime),
+         naDoy = ifelse(is.na(parameterValue), NA, doy))%>% #add columns for date, day of year, year, and Na day of year (= NA if data col = NA, otherwise = doy)
+  group_by(year, parameter)%>% #group by year and parameter
+  summarise(doyMin = min(doy), 
+            doyMax = max(doy), #calculate starting and ending day of year for each dataset
+            start = first(naDoy, na_rm = T), 
+            end = last(naDoy, na_rm = T))%>% #extract first and last obs with non-NA data
+  filter(doyMin<121) #drop years that start after May 1st
+
+maxStart <- max(ricks$start)
+minEnd <- min(ricks$end) #extract latest start and earliest end DOY's
+```
+
+Fill in missing date/times, then replace missing values with 0's:
+
+```{r}
+ricksFilled <- fullData%>%
+  filter(site == "Ricks Spring above confluence with Logan River")%>%
+  group_by(parameter)%>%
+  complete(dateTime = seq(min(dateTime), max(dateTime), by = "15 mins"))%>%
+  mutate(parameter = ifelse(is.na(parameter), unique(parameter), parameter))%>%
+  ungroup()%>%
+  mutate(doy =yday(dateTime))%>% #add doy column for calculations
+  mutate(parameterValue=ifelse(
+    (is.na(parameterValue)&doy<maxStart)|(is.na(parameterValue)&doy>minEnd), #if parameterValue is NA AND is before max start or after min end, 
+    0, parameterValue #replace with 0, else leave as is. 
+  ))%>%
+  mutate(site = ifelse(is.na(site), "Ricks Spring above confluence with Logan River", site))%>%
+  mutate(unit = ifelse(parameter == "Discharge_cfs", "cubic feet per second", "degree Celsius"))%>%
+  select(!doy)
+```
+
+Replace NA values before the latest start date / after the earliest end date with 0's:
+
+```{r}
+fullData_ricks <- fullData_wc%>%
+  filter(!site == "Ricks Spring above confluence with Logan River")%>% #drop original data
+  bind_rows(ricksFilled) #replace with filled data
+  
+
+ggplot(filter(fullData_ricks, site =="Ricks Spring above confluence with Logan River"), aes(x = dateTime, y = parameterValue, color = parameter))+
+  geom_point()+
+  theme_classic()
+```
+
+
+#### v. Adding Logan River @ First Dam and Highline Canal
 
 Read in data from USGS - NOTE current USGS API function only supports calling up to 3yrs of data at a time, so using a for-loop to pull and concatenate all data back to 1986 - takes a while to run. 
 
@@ -347,7 +402,7 @@ First year with 15min intervals is **1995**. All data from 1989-1994 is in 1hr i
 Add Logan at First Dam to overall dataset: 
 
 ```{r}
-fullData_usgs <- rbind(fullData_wc, loganAtFirstDam)
+fullData_usgs <- rbind(fullData_ricks, loganAtFirstDam)
 ```
 
 Check date ranges for each site: 
@@ -362,7 +417,8 @@ dateRanges <- fullData_usgs%>%
 dateRanges
 ```
 
-#### v. Data Cleaning + QA/QC
+
+#### vi. Data Cleaning + QA/QC
 
 First QA/QC Step: identifying partial years; create second dataset with only full years of data
 
@@ -435,7 +491,7 @@ fullData_flagged <- merge(dataGaps,fullData_complete)
 ```
 
 
-#### vi. Alternative formatting for DOY plotting:
+#### vii. Alternative formatting for DOY plotting:
 
 Alternative data format for DOY plots: 
 
@@ -459,6 +515,9 @@ dailyData <- fullData_usgs%>%
          year = year(date))%>% #calculate day of year minimum, maximum, median, and mean, plus quantiles for each doy
   ungroup()%>% #ungroup
   arrange(siteParam, date) #sort by site+parameter and date for easier checking
+
+
+unique(dailyData$siteParam)
 ```
 
 ### B. SNOTEL Data
@@ -1359,6 +1418,7 @@ snotelMerge <- snow%>%
 
 qMerge <- discharge%>%
   select(siteParam, year, metricName, metricValue)%>%
+  ungroup()%>%
   filter(metricName == "annualTot")%>%
   mutate(site = str_remove(siteParam, "Discharge"))%>%
   select(-siteParam)%>%
@@ -1414,7 +1474,7 @@ fb.plot <- ggplot(stQFbPV, aes(x = loganAtFbCFS, y = maxSWE, color = snotelSite)
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Logan River at Franklin Basin - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
-  scale_color_manual(values = brewer.pal(length(unique(stQFbPV$snotelSite)), "PRGn"))+
+  scale_color_manual(values = brewer.pal(length(unique(stQFbPV$snotelSite)), "Set3"))+
   geom_text(data = fbPVs, aes(x = x, label = paste("P=", p.label, ", ", "R2=", r.label)), y = Inf, vjust = 2)+
   facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
@@ -1422,8 +1482,8 @@ fb.plot <- ggplot(stQFbPV, aes(x = loganAtFbCFS, y = maxSWE, color = snotelSite)
         strip.text = element_text(size = 10, face = "bold"), 
         legend.position = "none")
 
-
 fb.plot
+
 
 #Save plot:
 ggsave("FranklinBasin_SNOTEL.jpg", fb.plot, device = "jpeg", path = here("outputs", "plots"), units = "in", dpi = "retina", height = 10, width = 10)
@@ -1461,7 +1521,7 @@ main.plot <- ggplot(stQMainPV, aes(x = loganAtMainCFS, y = maxSWE, color = snote
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Logan River at Main St. - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
-  scale_color_manual(values = brewer.pal(length(unique(stQFbPV$snotelSite)), "PRGn"))+
+  scale_color_manual(values = brewer.pal(length(unique(stQFbPV$snotelSite)), "Set3"))+
   geom_text(data = mainPVs, aes(x = x, label = paste("P=", p.label, ", ", "R2=", r.label)), y = Inf, vjust = 2)+
   facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
@@ -1509,7 +1569,7 @@ mendon.plot <- ggplot(stQFbPV, aes(x = loganAtMendonCFS, y = maxSWE, color = sno
   geom_smooth(se = T, method = "lm", linetype = "dashed")+
   theme_classic()+
   labs(x = "Logan River at Mendon - Total Annual Discharge, CFS", y = "Peak Snow Water Equivalent, cm", color = "Snotel Site")+
-  scale_color_manual(values = brewer.pal(length(unique(stQFbPV$snotelSite)), "PRGn"))+
+  scale_color_manual(values = brewer.pal(length(unique(stQFbPV$snotelSite)), "Set3"))+
   geom_text(data = mendonPVs, aes(x = x, label = paste("P=", p.label, ", ", "R2=", r.label)), y = Inf, vjust = 2)+
   facet_wrap(~snotelSite, scales = "free", labeller = label_wrap_gen(width = 40))+
   theme(axis.text = element_text(size = 11), 
@@ -1660,7 +1720,12 @@ Merge with LRO discharge data:
 
 ```{r}
 snotelAllLro <- merge(snotelAll_merge, qMerge)%>%
-  mutate(siteCode = as.numeric(site_name))
+  mutate(siteCode = as.numeric(site_name))%>%
+  arrange(site_name, year)%>%
+  mutate(site_name = as.character(site_name))%>%
+  filter(!site_name == "clarkston mountain ")
+
+unique(snotelAllLro$site_name)
 ```
 
 
@@ -1675,31 +1740,24 @@ FbModelResults <- tibble()
 for(i in 1:length(sites)){
   d <- filter(snotelAllLro, site_name == sites[i])
   mod <- lm(loganAtFbCFS~sweMax, data = d)
-  modSum <-c(sites[i],glance(mod))
-  
+  modSum <-tibble(sites[i], glance(mod)$adj.r.squared, glance(mod)$p.value)%>%
+    rename(site_name = 1, adjR2 = 2, pVal = 3)
+
   FbModelResults<-rbind(modSum, FbModelResults)
   
-  colnames(FbModelResults) <- c("siteCode", names(glance((mod))))
+  
 }
-
-siteInfo <- snotelAllLro%>%
-  select(site_name, siteCode)%>%
-  distinct()
-
-FbModelResults <- FbModelResults%>%
-  merge(siteInfo, all = F)%>%
-  arrange(adj.r.squared)
 ```
 
 Add R2 values for plotting: 
 
 ```{r}
 FbStPlot <- snotelAllLro%>%
-  merge(select(FbModelResults, site_name, adj.r.squared))
+  merge(select(FbModelResults, site_name, adjR2))
 
 FbStR2 <- FbStPlot%>%
   group_by(site_name)%>%
-  summarize(x = mean(loganAtFbCFS), label = round(unique(adj.r.squared), 2))
+  summarize(x = mean(loganAtFbCFS, na.rm = T), label = round(unique(adjR2), 2))
 ```
 
 Draw plots:
@@ -1738,31 +1796,24 @@ MainModelResults <- tibble()
 for(i in 1:length(sites)){
   d <- filter(snotelAllLro, site_name == sites[i])
   mod <- lm(loganAtMainCFS~sweMax, data = d)
-  modSum <-c(sites[i],glance(mod))
+  modSum <-tibble(sites[i], glance(mod)$adj.r.squared, glance(mod)$p.value)%>%
+    rename(site_name = 1, adjR2 = 2, pVal = 3)
   
   MainModelResults<-rbind(modSum, MainModelResults)
   
-  colnames(MainModelResults) <- c("siteCode", names(glance((mod))))
 }
 
-siteInfo <- snotelAllLro%>%
-  select(site_name, siteCode)%>%
-  distinct()
-
-MainModelResults <- MainModelResults%>%
-  merge(siteInfo, all = F)%>%
-  arrange(adj.r.squared)
 ```
 
 Add R2 values for plotting: 
 
 ```{r}
 MainStPlot <- snotelAllLro%>%
-  merge(select(MainModelResults, site_name, adj.r.squared))
+  merge(select(MainModelResults, site_name, adjR2))
 
 MainStR2 <- MainStPlot%>%
-  group_by(site_name)%>%
-  summarize(x = mean(loganAtMainCFS), label = round(unique(adj.r.squared), 2))
+  group_by(site_name, na.rm = T)%>%
+  summarize(x = mean(loganAtMainCFS), label = round(unique(adjR2), 2))
 ```
 
 Draw plots:
@@ -1801,31 +1852,23 @@ MendonModelResults <- tibble()
 for(i in 1:length(sites)){
   d <- filter(snotelAllLro, site_name == sites[i])
   mod <- lm(loganAtMendonCFS~sweMax, data = d)
-  modSum <-c(sites[i],glance(mod))
+  modSum <-tibble(sites[i], glance(mod)$adj.r.squared, glance(mod)$p.value)%>%
+    rename(site_name = 1, adjR2 = 2, pVal = 3)
   
   MendonModelResults<-rbind(modSum, MendonModelResults)
-  
-  colnames(MendonModelResults) <- c("siteCode", names(glance((mod))))
+
 }
-
-siteInfo <- snotelAllLro%>%
-  select(site_name, siteCode)%>%
-  distinct()
-
-MendonModelResults <- MendonModelResults%>%
-  merge(siteInfo, all = F)%>%
-  arrange(adj.r.squared)
 ```
 
 Add R2 values for plotting: 
 
 ```{r}
 MendonStPlot <- snotelAllLro%>%
-  merge(select(MendonModelResults, site_name, adj.r.squared))
+  merge(select(MendonModelResults, site_name, adjR2))
 
 MendonStR2 <- MendonStPlot%>%
   group_by(site_name)%>%
-  summarize(x = mean(loganAtMendonCFS), label = round(unique(adj.r.squared), 2))
+  summarize(x = mean(loganAtMendonCFS, na.rm = T), label = round(unique(adjR2), 2))
 ```
 
 Draw plots:

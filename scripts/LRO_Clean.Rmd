@@ -1,0 +1,119 @@
+---
+title: "LRO_Clean"
+author: "Gordon Gianniny"
+date: "2026-07-31"
+output: html_document
+---
+
+```{r setup, include=F, echo = F}
+library(tidyverse)
+library(broom)
+library(ggplot2)
+library(lubridate)
+library(RColorBrewer)
+library(here)
+library(reticulate)
+library(patchwork)
+library(snotelr)
+library(zoo)
+library(dataRetrieval)
+library(cpop)
+
+py_require("pip")
+py_require("hydroserverpy")
+py_require("datetime")
+use_python("/Library/Frameworks/Python.framework/Versions/3.14/bin/python3", required = T)
+
+knitr::opts_knit$set(root.dir = here("outputs", "htmls"))
+```
+
+# **LRO Data Processing Script**
+
+## I. Overview
+
+This script performs the following operations:
+
+  1. Read in data from LRO, USGS, and SNOTEL
+    + Site-specific data cleaning:
+      + Wood Camp Spring
+      + Rick's Spring
+      + Logan River at 1st Dam
+  2. Initial Data QA/QC: 
+    + Fill in data gaps using regression
+    + Calculate % missing obs, % regressed obs for each site/parameter/year. 
+  3. Run metrics analysis:
+    + SNOTEL & Precip
+      + Snowpack
+      + Cumulative precip
+      + Rain vs. snow
+    + Canyon Sites
+      + Discharge
+      + Water Temperature
+    + Valley Sites
+      + Discharge
+      + Water Temp
+  4. Build and export metric summary table
+  5. Auxiliary plots
+    + Rainbow plots
+    + Basic Time Series
+
+The script is designed to run with minimal inputs after the initial site + metric selection process. 
+
+*File Strucutre:*
+
+  - Primary analysis plots are stored in the "plots>summaryFigures" folder. 
+  - Auxiliary plots (rainbow plots, time series, etc.) are stored in the "plots>auxilaryFigures" folder
+  
+## II. Read in data from LRO, USGS, and SNOTEL
+
+#### i. LRO Data Import
+
+#### ii. USGS Data Import
+
+#### iii. SNOTEL Data Import
+
+### A. Site-specific data cleaning:
+
+#### i. Wood Camp Spring
+
+#### ii. Rick's Spring
+
+#### iii. Logan River at 1st Dam
+      
+## III. Initial Data QA/QC: 
+
+### A. Fill in data gaps using regression
+
+### B. Calculate % missing obs, % regressed obs for each site/parameter/year. 
+
+## IV. Run metrics analysis:
+
+### A. SNOTEL & Precip
+
+#### i. Snowpack
+
+#### ii. Cumulative precip
+
+#### iii. Rain vs. snow
+      
+### B. Canyon Sites
+
+#### i. Discharge
+
+#### ii. Water Temperature
+      
+### C. Valley Sites
+
+#### i. Discharge
+
+#### ii. Water Temp
+      
+## V. Build and export metric summary table
+
+##VI. Auxiliary plots
+
+### A. Rainbow plots
+
+### B. Basic Time Series
+  
+      
