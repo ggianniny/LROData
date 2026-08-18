@@ -2973,6 +2973,7 @@ First, extract temperature data for canyon sites, add necessary cols for calcula
 ```{r}
 canyonTempsFull <- fullData_usgs%>%
   filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove"|site =="Temple Fork above confluence with Logan River"|site=="Right Hand Fork above confluence with Logan River")%>% #extract canyon sites
+  filter(parameter == "Water Temperature")%>%
   select(!c(parameter, unit))%>% #drop extra cols
   rename(waterTemp = parameterValue)%>% #renaming cols
   mutate(year = year(dateTime), 
@@ -3057,6 +3058,81 @@ deg.hr.plot
 ggsave("Canyon_degreeHours.jpg", deg.hr.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
 ```
 
+#### vi. Using data gaps as proxy for ice presence/absence 
+
+Goal: Use discharge data from canyon sites, assume that any data gap between Nov 15 and March 15 (random dates) is due to ice on the sensor. Compare total # of days with no discharge data over time. 
+
+Extract discharge data for Nov 15-March 15, calculate gap length (days) for each site/waterYear:
+
+```{r}
+winterGaps <- fullData_usgs%>%
+  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove"|site =="Temple Fork above confluence with Logan River"|site=="Right Hand Fork above confluence with Logan River")%>% #extract canyon sites
+  filter(parameter == "Discharge_cfs")%>%
+  mutate(year = year(dateTime), month = month(dateTime), doy = yday(dateTime))%>% #add year, month, and DOY columns
+  #group_by(site, year)%>%
+  #mutate(doyMax = max(doy), doyMin = min(doy))%>%
+  #ungroup()%>%
+  mutate(waterYear = ifelse(month>9, year+1, year))%>%#add water year
+  filter(doy<=74|doy>=319)%>% #extract data for Nov 15-Mar 15
+  mutate(gapVal = ifelse(is.na(parameterValue), 0.25, 0))%>% #add column to assign 0.25 as value for every NA ready (15min), 0 to any value with data present. 
+  group_by(site, waterYear)%>%
+  summarise(gapDays = (sum(gapVal)/24))%>% #calculate total gap length in days
+  mutate(gapDays = ifelse((site=="Logan River at First Dam"&waterYear<1995), (gapDays*4), gapDays))
+```
+
+Nest data by site:
+
+```{r}
+gapNest <- winterGaps %>%
+  nest(data = -c(site)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+gapModels <- gapNest %>%
+  mutate(model = map(data, ~lm(gapDays~waterYear, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "waterYear")  #remove intercept term to just get info on year for each site
+gapModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+gapPV <- merge(winterGaps, 
+                     select(gapModels, site, p.value) #add p-values
+                     )%>%
+  group_by(site)%>%
+  mutate(meanYear = mean(waterYear))%>%
+  ungroup()
+
+gPVs <- gapPV%>%
+  group_by(site)%>%
+  summarize(x = mean(waterYear), label = round(unique(p.value), 2), y = Inf) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+gap.plot <- ggplot(gapPV, aes(x = waterYear, y = gapDays))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Water Year", y = "Total days with missing data, Nov 15-Mar 15")+
+  geom_text(data = gPVs, aes(x = x, y = y,label = paste("P=", label)), vjust = 2)+
+  facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+gap.plot
+
+#Save plot:
+ggsave("winter_gaps.jpg", gap.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
 ### D. Valley Sites - Discharge + Temperature Metrics
 
 Valley sites currently included are: 
@@ -3643,10 +3719,6 @@ valleyRegCor[2950:2960,] #check 1st data gap
 valleyRegCor[278662:278680,] #check random longer data gap
 ```
 
------
------
-
-#STOPPING HERE ON 7/23 - need to re-code all valley analyses after this point using updated regression data. Idea for next time - write a function that will calculate % missing and % regressed for a subset of the data - will be doing this a bunch for lots of different time periods, would be nice to not have to code out every time. 
 
 ######2. Re-check data availability and prep for analysis. 
 
