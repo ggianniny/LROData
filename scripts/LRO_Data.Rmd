@@ -2721,7 +2721,7 @@ Data prep:
 
 ```{r}
 canyonTemps <- fullData_usgs%>%
-  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove")%>% #extract canyon sites
+  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove"|site =="Temple Fork above confluence with Logan River"|site=="Right Hand Fork above confluence with Logan River")%>% #extract canyon sites
   filter(parameter == "Water Temperature")%>% #extract temperature data
   select(!c(parameter, unit))%>% #drop extra cols
   rename(waterTemp = parameterValue)%>% #renaming cols
@@ -2840,6 +2840,222 @@ canyon.temp.plot
 ggsave("Canyon_summerTemps.jpg", canyon.temp.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
 ```
 
+#### iv. Winter stream temperatures
+
+Data prep:
+
+```{r}
+canyonWinterTemps <- fullData_usgs%>%
+  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove"|site =="Temple Fork above confluence with Logan River"|site=="Right Hand Fork above confluence with Logan River")%>% #extract canyon sites
+  filter(parameter == "Water Temperature")%>% #extract temperature data
+  select(!c(parameter, unit))%>% #drop extra cols
+  rename(waterTemp = parameterValue)%>% #renaming cols
+  mutate(year = year(dateTime), 
+         month = month(dateTime), 
+         doy = yday(dateTime), 
+         date = ymd(substr(dateTime, 1, 10)))%>% #extract year, month, and date
+  mutate(waterYear=ifelse(month<10, year, year+1))%>% #add water year column
+  group_by(site,year)%>% 
+  mutate(doyMin = min(doy), 
+         doyMax = max(doy))%>% #calculate min and max DOY for each site/year
+  mutate(waterDOY = ifelse(doy>=doyMax-91, 
+                           doy-(doyMax-92), 
+                           doy+92)
+         )%>% #use min/max Doy to calculate water day of year
+  ungroup()%>%
+  filter(month==12|month==1|month==2) #extract Dec-Feb
+```
+
+Drop years with >5% missing data: 
+
+```{r}
+canyonWinterTempsClean <- canyonWinterTemps%>%
+  group_by(site, year)%>% #group by site and year
+  mutate(nMissing = length(which(is.na(waterTemp))), 
+         nTot = n())%>% #calculate # missing obs, total # obs
+  mutate(percMissing = (nMissing/nTot)*100)%>% #calculate % missing obs
+  ungroup()%>%
+  filter(!percMissing>5) #drop years with >5% data missing. 
+```
+
+Calculate metrics of interest; rearrange for plotting:
+
+For BCT Temps: using 17 C based on this reference: https://ndep.nv.gov/uploads/water-wqs-docs/BonnevilleLCTTTA.pdf
+
+```{r}
+canyonWinterTempMetrics <- canyonWinterTempsClean %>%
+  group_by(site, year, doy)%>%
+  mutate(dailyMax = max(waterTemp, na.rm = T), 
+         dailyMean = mean(waterTemp, na.rm = T))%>%
+  ungroup()%>%
+  mutate(dailyMax = ifelse(is.infinite(dailyMax), NA, dailyMax), 
+         dailyMean = ifelse(is.infinite(dailyMean), NA, dailyMean))%>%
+  group_by(site, year)%>%
+  summarise(
+    meanTemp = mean(waterTemp, na.rm = T), 
+    meanMax = mean(dailyMax, na.rm = T), 
+    medTemp = median(waterTemp, na.rm = T)
+    )%>%
+  pivot_longer(!c(site, year), names_to = "metric", values_to = "metricValue")%>%
+  mutate(siteMetric = paste(site, metric, sep = " - "))%>%
+  mutate(metricPrint = case_when(
+    metric == "meanTemp" ~ "Mean Dec-Feb Stream Temp., C", 
+    metric == "meanMax" ~ "Mean daily maximum Dec-Feb Stream Temp, C", 
+    metric == "medTemp" ~ "Median Dec-Feb Stream Temp., C"
+  ))
+```
+
+Run analysis: 
+
+Nest data:
+
+
+```{r}
+CanyonWinterNest <- canyonWinterTempMetrics %>%
+  nest(data = -c(siteMetric)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+CanyonWinterModels <- CanyonWinterNest %>%
+  mutate(model = map(data, ~lm(metricValue~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+CanyonWinterModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+CanyonWinterPV <- merge(canyonWinterTempMetrics, 
+                     select(CanyonWinterModels, siteMetric, p.value) #add p-values
+                     )%>%
+  group_by(site, metric)%>%
+  mutate(meanYear = mean(year))%>%
+  ungroup()
+
+ctwPVs <- CanyonWinterPV%>%
+  group_by(siteMetric, metricPrint)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2), y = Inf) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+canyon.winter.plot <- ggplot(CanyonWinterPV, aes(x = year, y = metricValue, color = factor(metricPrint)))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Metric Value", color = "Legend")+
+  scale_color_manual(values = c("darkblue", "cyan3", "darkgreen"))+
+  geom_text(data = ctwPVs, aes(x = x, y = y,label = paste("P=", label)), vjust = 2)+
+  facet_wrap(~siteMetric, scales = "free", labeller = label_wrap_gen(width = 40))+
+  #geom_text(aes(x = meanYear, y = 17.1, label = "BCT Chronic Temp. Threshold"), color = "darkgrey", size = 2.5 )+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+canyon.winter.plot
+
+#Save plot:
+ggsave("Canyon_winterTemps.jpg", canyon.winter.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
+
+#### v. BCT Chronic temp threshold "degree hours"
+
+Goal = calculate total number of hours per year above BCT chronic temp threshold of 17C. 
+
+First, extract temperature data for canyon sites, add necessary cols for calculations & drop years with >5% missing data: 
+
+```{r}
+canyonTempsFull <- fullData_usgs%>%
+  filter(site == "Logan River near Franklin Basin"|site == "Wood Camp Spring"|site == "Logan River at First Dam"|site == "Ricks Spring above confluence with Logan River"|site == "Logan River at Guinavah Campground Bridge"|site == "Logan River near Tony Grove"|site =="Temple Fork above confluence with Logan River"|site=="Right Hand Fork above confluence with Logan River")%>% #extract canyon sites
+  select(!c(parameter, unit))%>% #drop extra cols
+  rename(waterTemp = parameterValue)%>% #renaming cols
+  mutate(year = year(dateTime), 
+         month = month(dateTime), 
+         doy = yday(dateTime), 
+         date = ymd(substr(dateTime, 1, 10)))%>% #extract year, month, and date
+  mutate(waterYear=ifelse(month<10, year, year+1))%>% #add water year column
+  group_by(site,year)%>% 
+  mutate(doyMin = min(doy), 
+         doyMax = max(doy))%>% #calculate min and max DOY for each site/year
+  mutate(waterDOY = ifelse(doy>=doyMax-91, 
+                           doy-(doyMax-92), 
+                           doy+92)
+         )%>% #use min/max Doy to calculate water day of year
+  mutate(nMissing = length(which(is.na(waterTemp))), 
+         nTot = n())%>% #calculate # missing obs, total # obs
+  mutate(percMissing = (nMissing/nTot)*100)%>% #calculate % missing obs
+  ungroup()%>%
+  filter(!percMissing>5) #drop years with >5% data missing. 
+```
+
+Next, calculate degree hours for each year:
+
+```{r}
+canyonDeg <- canyonTempsClean%>%
+  mutate(over17 = ifelse(waterTemp>17, 0.25, 0))%>%
+  group_by(site, year)%>%
+  summarise(degHrs = sum(over17))
+```
+
+Nest data, run basic LM for each site:
+
+```{r}
+degHrNest <- canyonDeg %>%
+  nest(data = -c(site)) #create new nested dataframe with columns for site and metricName, one column for data - data entries for each site include year and metricValues. 
+```
+
+Run basic models for each site and metric of interest: 
+
+```{r}
+degModels <- degHrNest %>%
+  mutate(model = map(data, ~lm(degHrs~year, data = .)%>% #run a model of temp~year for each site (referenced by "."); store results in new column called "model"
+                     tidy))%>% #tidy function to construct a summary table with model results (seperate tables for each site)
+  unnest(model) %>% #unnest model column to get rows for each site, columns for model metrics
+  filter(term == "year")  #remove intercept term to just get info on year for each site
+degModels
+```
+
+Add P-values for plotting: 
+
+```{r}
+degPV <- merge(canyonDeg, 
+                     select(degModels, site, p.value) #add p-values
+                     )%>%
+  group_by(site)%>%
+  mutate(meanYear = mean(year))%>%
+  ungroup()
+
+dhPVs <- degPV%>%
+  group_by(site)%>%
+  summarize(x = mean(year), label = round(unique(p.value), 2), y = Inf) #create separate dataframe with p-values for adding to plots
+```
+
+Plotting:
+
+```{r}
+deg.hr.plot <- ggplot(degPV, aes(x = year, y = degHrs))+
+  geom_point()+
+  geom_smooth(se = T, method = "lm", linetype = "dashed")+
+  theme_classic()+
+  labs(x = "Year", y = "Total hours per year with stream temperature >17 C")+
+  geom_text(data = dhPVs, aes(x = x, y = y,label = paste("P=", label)), vjust = 2)+
+  facet_wrap(~site, scales = "free", labeller = label_wrap_gen(width = 40))+
+  theme(axis.text = element_text(size = 11), 
+        axis.title = element_text(size = 11, face = "bold"), 
+        strip.text = element_text(size = 10, face = "bold"), 
+        legend.position = "bottom")
+
+deg.hr.plot
+
+#Save plot:
+ggsave("Canyon_degreeHours.jpg", deg.hr.plot, device = "jpeg", path = here("outputs", "plots", "updatedTrends"), units = "in", dpi = "retina", height = 10, width = 10)
+```
 
 ### D. Valley Sites - Discharge + Temperature Metrics
 
