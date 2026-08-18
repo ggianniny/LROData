@@ -84,7 +84,11 @@ The script is designed to run with minimal inputs after the initial site + metri
 
 ### A. Fill in data gaps using regression
 
+Idea for next time - write a function that will calculate % missing and % regressed for a subset of the data - will be doing this a bunch for lots of different time periods, would be nice to not have to code out every time. 
+
 ### B. Calculate % missing obs, % regressed obs for each site/parameter/year. 
+
+**Should also add DOY, water year, water DOY, etc. in this step. 
 
 ## IV. Run metrics analysis:
 
